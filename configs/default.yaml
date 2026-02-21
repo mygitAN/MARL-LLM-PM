@@ -1,0 +1,72 @@
+# Multi-Agent Reinforcement Learning with LLM for Portfolio Management
+# Default Configuration File
+
+# Environment Configuration
+environment:
+  initial_portfolio_value: 100000.0
+  max_steps: 252  # Trading days (1 year)
+  transaction_cost: 0.001  # 0.1% transaction cost
+  
+  # Assets to manage
+  assets:
+    - AAPL
+    - GOOGL
+    - MSFT
+    - NVDA
+    - TSLA
+
+# Agent Configuration
+agents:
+  n_agents: 3
+  agent_type: "dummy"  # Options: dummy, rl, llm
+  aggregation_method: "mean"  # How to combine agent weights: mean, median, weighted
+  update_frequency: "daily"
+
+# LLM Sentiment Analysis Configuration
+llm:
+  enabled: true
+  model: "claude-3-5-sonnet-20241022"  # Anthropic Claude model
+  sentiment_scale: 10  # 1-10 scale for sentiment
+  cache_enabled: true  # Use daily caching to avoid redundant API calls
+  cache_dir: ".cache/sentiment"
+  batch_analysis: true  # Analyze multiple assets in one call
+  api_key: null  # Uses ANTHROPIC_API_KEY env var if not set
+
+# Backtesting Configuration
+backtesting:
+  initial_capital: 100000.0
+  transaction_cost: 0.001
+  rebalance_frequency: "daily"  # How often to rebalance: daily, weekly, monthly
+  benchmark: null  # Optional benchmark ticker for alpha/beta calculation
+  start_date: null  # YYYY-MM-DD format, uses data start if null
+  end_date: null    # YYYY-MM-DD format, uses data end if null
+
+# Training Configuration
+training:
+  num_episodes: 100
+  max_steps_per_episode: 252
+  learning_rate: 0.001
+  batch_size: 32
+  update_frequency: 10
+  checkpoint_dir: "./checkpoints"
+  
+# Data Configuration
+data:
+  source: "yfinance"  # Data provider: yfinance, tiingo, etc.
+  frequency: "daily"  # Data frequency: daily, hourly, etc.
+  lookback_period: 252  # Days of historical data to load
+  
+# Logging and Monitoring
+logging:
+  level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR
+  log_dir: "./logs"
+  save_results: true
+  results_dir: "./results"
+
+# Advanced Hyperparameters
+advanced:
+  random_seed: 42
+  use_gpu: false
+  num_workers: 4
+  gradient_clipping: 1.0
+  weight_decay: 0.0001

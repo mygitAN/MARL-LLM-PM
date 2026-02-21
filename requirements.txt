@@ -1,0 +1,22 @@
+# Python dependencies for MARL-LLM-PM
+
+# Core ML & Data
+numpy>=1.21.0
+pandas>=1.3.0
+gymnasium>=0.27.0
+pyyaml>=6.0
+
+# LLM & API
+anthropic>=0.25.0
+
+# Backtesting & Finance
+yfinance>=0.2.0
+
+# Testing
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# Development
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.0.0
