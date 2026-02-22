@@ -1,8 +1,20 @@
 """Agent coordinator for multi-agent portfolio weight aggregation."""
 
+import logging
 import numpy as np
 from typing import List, Dict, Optional
 from .base_agent import BaseAgent
+from ..constants import EPSILON
+
+logger = logging.getLogger(__name__)
+
+
+def safe_normalize(weights: np.ndarray) -> np.ndarray:
+    """Normalise weights to sum to 1; falls back to equal weights on degenerate input."""
+    total = weights.sum()
+    if total == 0 or not np.isfinite(total):
+        return np.ones_like(weights) / len(weights)
+    return weights / total
 
 
 class AgentCoordinator:
@@ -66,7 +78,7 @@ class AgentCoordinator:
         
         # Normalize and clip to ensure valid weights
         aggregated = np.clip(aggregated, 0, 1)
-        aggregated = aggregated / (aggregated.sum() + 1e-8)
+        aggregated = safe_normalize(aggregated)
         
         return aggregated
     
@@ -145,8 +157,9 @@ class AgentCoordinator:
                 "max_pairwise_difference": float(max_pairwise_diff),
                 "num_agents": self.n_agents,
             }
-        except Exception:
-            return {"error": "Could not compute diversity metrics"}
+        except Exception as e:
+            logger.warning(f"Could not compute diversity metrics: {e}", exc_info=True)
+            return {"error": f"Could not compute diversity metrics: {type(e).__name__}"}
     
     def save_all(self, checkpoint_dir: str) -> None:
         """Save all agents to checkpoint directory."""

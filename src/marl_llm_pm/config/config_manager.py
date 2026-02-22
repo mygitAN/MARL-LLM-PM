@@ -1,9 +1,12 @@
 """Configuration management module."""
 
+import logging
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass, asdict
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -85,8 +88,8 @@ class ConfigManager:
         try:
             with open(self.config_path, 'r') as f:
                 self.config = yaml.safe_load(f) or {}
-        except Exception as e:
-            print(f"Error loading config: {e}")
+        except (OSError, yaml.YAMLError) as e:
+            logger.error(f"Error loading config from {self.config_path}: {e}")
             self._load_defaults()
     
     def _load_defaults(self) -> None:
@@ -132,8 +135,8 @@ class ConfigManager:
         try:
             with open(output_path, 'w') as f:
                 yaml.dump(self.config, f, default_flow_style=False)
-        except Exception as e:
-            print(f"Error saving config: {e}")
+        except OSError as e:
+            logger.error(f"Error saving config to {output_path}: {e}")
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary."""
