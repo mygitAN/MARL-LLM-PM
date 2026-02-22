@@ -2,10 +2,14 @@
 """
 CLI entry point for MARL-LLM-PM portfolio management system.
 
-Examples:
+Thesis pipeline (primary):
+    python main.py sleeve-backtest --config configs/thesis.yaml
+    python main.py sleeve-backtest --config configs/thesis.yaml --walk-forward
+
+Legacy asset pipeline:
     python main.py backtest --config configs/default.yaml --assets AAPL GOOGL MSFT
-    python main.py test --config configs/default.yaml
-    python main.py train --episodes 100 --assets AAPL GOOGL --start-date 2023-01-01
+    python main.py analyze --assets AAPL GOOGL --date 2024-01-15
+    python main.py test --coverage
 """
 
 import argparse
@@ -27,7 +31,16 @@ from marl_llm_pm import (
     AgentCoordinator,
     SentimentAnalyzer,
     Backtester,
+    BacktestResults,
     ConfigManager,
+)
+from marl_llm_pm.thesis import (
+    StrategySleeveEnv,
+    StrategyPreferenceAgent,
+    collect_preferences,
+    MetaAllocator,
+    RegimeInterpreter,
+    proportional_walk_forward,
 )
 
 
@@ -229,6 +242,193 @@ def cmd_analyze(args, config: ConfigManager) -> None:
         raise
 
 
+def _build_metrics(window: pd.DataFrame, lookback: int = 12) -> dict:
+    """Compute rolling numeric metrics for regime classification."""
+    avg = window.mean(axis=1)
+    vol      = float(avg.std())              if len(avg) > 2  else 0.0
+    trend    = float(avg.mean())             if len(avg) > 2  else 0.0
+    drawdown = float(avg.cumsum().min())     if len(avg) > 2  else 0.0
+    if window.shape[1] > 1 and len(window) > 3:
+        corr = float(window.corr().values[window.corr().values != 1].mean())
+    else:
+        corr = 0.0
+    return {"vol": vol, "trend": trend, "drawdown": drawdown, "corr": corr}
+
+
+def _run_sleeve_episode(
+    sleeve_returns: pd.DataFrame,
+    sleeves: list,
+    tc: float,
+    cap: float,
+    initial_capital: float,
+    lookback: int,
+    config: ConfigManager,
+) -> tuple:
+    """Run a single sleeve-backtest episode. Returns (values, returns, weight_history)."""
+    env = StrategySleeveEnv(
+        sleeve_names=sleeves,
+        transaction_cost=tc,
+        max_weight_per_sleeve=cap,
+        initial_value=initial_capital,
+    )
+    env.set_sleeve_returns(sleeve_returns)
+
+    agents = [
+        StrategyPreferenceAgent(
+            s,
+            bias=config.get('agents', f'{s.lower()}_bias') or 0.0,
+        )
+        for s in sleeves
+    ]
+    allocator = MetaAllocator(
+        sleeve_names=sleeves,
+        cap=cap,
+        temperature=config.get('agents', 'temperature') or 1.0,
+    )
+    regime = RegimeInterpreter(
+        cache_dir=config.get('llm', 'cache_dir') or '.cache/regimes',
+        use_cache=config.get('llm', 'cache_enabled') if config.get('llm', 'cache_enabled') is not None else True,
+        use_llm=config.get('llm', 'use_llm') or False,
+    )
+
+    env.reset()
+    values, rets, weight_history = [], [], []
+    prev_value = env.value
+    index = sleeve_returns.index
+
+    for t in range(len(sleeve_returns)):
+        window = sleeve_returns.iloc[max(0, t - lookback): t]
+        metrics = _build_metrics(window, lookback)
+
+        date_key = str(index[t].date()) if hasattr(index[t], 'date') else str(index[t])
+        reg_out = regime.classify(key=date_key, metrics=metrics)
+
+        obs = {
+            "regime_label": reg_out.label,
+            "sleeve_features": {
+                s: {"signal": float(window[s].mean()) if len(window) > 2 else 0.0}
+                for s in sleeves
+            },
+            "global_features": metrics,
+            "prev_weights": env.w.copy(),
+        }
+
+        alphas = collect_preferences(agents, obs)
+        w = allocator.allocate(alphas, obs)
+        _, info, done = env.step(w)
+
+        values.append(info.portfolio_value)
+        rets.append((info.portfolio_value / prev_value) - 1.0)
+        weight_history.append({s: w[i] for i, s in enumerate(sleeves)})
+        prev_value = info.portfolio_value
+
+        if done:
+            break
+
+    return values, rets, weight_history
+
+
+def cmd_sleeve_backtest(args, config: ConfigManager) -> None:
+    """Run the thesis strategy-sleeve backtest pipeline."""
+    logger.info("Starting thesis sleeve backtest...")
+
+    # Load sleeve return data
+    csv_path = Path(
+        args.sleeve_returns or config.get('data', 'sleeve_returns_csv') or 'data/sleeve_returns.csv'
+    ).resolve()
+
+    if not csv_path.exists():
+        logger.error(f"Sleeve returns CSV not found: {csv_path}")
+        return
+
+    try:
+        sleeve_returns = pd.read_csv(csv_path, index_col=0, parse_dates=True)
+    except (OSError, ValueError) as e:
+        logger.error(f"Failed to read sleeve returns: {e}")
+        return
+
+    sleeves       = config.get('environment', 'sleeves') or ['MOMENTUM', 'VALUE', 'QUALITY']
+    tc            = config.get('environment', 'transaction_cost') or 0.001
+    cap           = config.get('environment', 'max_weight_per_sleeve') or 0.70
+    initial_cap   = config.get('backtesting', 'initial_capital') or 100_000.0
+    lookback      = config.get('regime', 'lookback_steps') or 12
+
+    missing = [s for s in sleeves if s not in sleeve_returns.columns]
+    if missing:
+        logger.error(f"Missing sleeve columns in CSV: {missing}")
+        return
+
+    sleeve_returns = sleeve_returns[sleeves].dropna()
+    logger.info(f"Loaded {len(sleeve_returns)} periods | sleeves: {sleeves}")
+
+    if args.walk_forward:
+        # Walk-forward mode: train/val/test splits + sealed holdout
+        eval_cfg = config.get('evaluation') or {}
+        train_df, val_df, test_windows, holdout_df = proportional_walk_forward(
+            sleeve_returns,
+            split_train=eval_cfg.get('split_train', 0.60),
+            split_val=eval_cfg.get('split_val', 0.20),
+            split_test=eval_cfg.get('split_test', 0.20),
+            test_interval_months=eval_cfg.get('test_interval_months', 6),
+            holdout_months=eval_cfg.get('holdout_months', 12),
+        )
+        logger.info(
+            f"Walk-forward splits — train: {len(train_df)}, val: {len(val_df)}, "
+            f"test windows: {len(test_windows)}, holdout: {len(holdout_df)} (sealed)"
+        )
+        logger.info("Running on validation set...")
+        data_to_run = val_df
+    else:
+        data_to_run = sleeve_returns
+
+    values, rets, weight_history = _run_sleeve_episode(
+        data_to_run, sleeves, tc, cap, initial_cap, lookback, config
+    )
+
+    if not values:
+        logger.error("No results produced.")
+        return
+
+    # Compute and display summary metrics
+    returns_arr = np.array(rets)
+    steps_per_year = config.get('environment', 'steps_per_year') or 52
+    ann_factor = steps_per_year ** 0.5
+
+    total_ret  = (values[-1] / initial_cap) - 1.0
+    ann_vol    = float(np.std(returns_arr)) * ann_factor
+    ann_ret    = float(np.mean(returns_arr)) * steps_per_year
+    sharpe     = (ann_ret / ann_vol) if ann_vol > 0 else 0.0
+    cum        = np.cumprod(1 + returns_arr)
+    peak       = np.maximum.accumulate(cum)
+    max_dd     = float(((cum - peak) / np.where(peak > 0, peak, 1)).min())
+    avg_w      = {s: float(np.mean([wh[s] for wh in weight_history])) for s in sleeves}
+
+    logger.info("=" * 52)
+    logger.info("THESIS SLEEVE BACKTEST — RESULTS")
+    logger.info("=" * 52)
+    logger.info(f"  Periods run:        {len(values)}")
+    logger.info(f"  Final NAV:          £{values[-1]:>12,.2f}")
+    logger.info(f"  Total return:       {total_ret:>10.2%}")
+    logger.info(f"  Annualised return:  {ann_ret:>10.2%}")
+    logger.info(f"  Annualised vol:     {ann_vol:>10.2%}")
+    logger.info(f"  Sharpe ratio:       {sharpe:>10.2f}")
+    logger.info(f"  Max drawdown:       {max_dd:>10.2%}")
+    logger.info(f"  Avg sleeve weights: { {k: f'{v:.1%}' for k, v in avg_w.items()} }")
+    logger.info("=" * 52)
+
+    # Save results
+    results_dir = Path('./results')
+    results_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    out_csv = results_dir / f"sleeve_backtest_{ts}.csv"
+    rows = [
+        {"period": i, "portfolio_value": v, "return": r, **wh}
+        for i, (v, r, wh) in enumerate(zip(values, rets, weight_history))
+    ]
+    pd.DataFrame(rows).to_csv(out_csv, index=False)
+    logger.info(f"Results saved to {out_csv}")
+
+
 def cmd_test(args, config: ConfigManager) -> None:
     """Run pytest test suite."""
     import subprocess
@@ -256,23 +456,45 @@ def main():
         description='Multi-Agent Reinforcement Learning with LLM for Portfolio Management',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''Examples:
-  python main.py backtest --assets AAPL GOOGL MSFT
-  python main.py analyze --assets AAPL GOOGL --date 2024-01-15
+  # Thesis pipeline (primary)
+  python main.py sleeve-backtest
+  python main.py sleeve-backtest --walk-forward
+  python main.py sleeve-backtest --sleeve-returns data/sleeve_returns.csv
+
+  # Legacy asset pipeline
+  python main.py --config configs/default.yaml backtest --assets AAPL GOOGL MSFT
+  python main.py --config configs/default.yaml analyze --assets AAPL --date 2024-01-15
   python main.py test --coverage
-  python main.py train --episodes 100
         '''
     )
     
     parser.add_argument(
         '--config',
-        default='configs/default.yaml',
-        help='Path to configuration file'
+        default='configs/thesis.yaml',
+        help='Path to configuration file (default: configs/thesis.yaml)'
     )
-    
+
     subparsers = parser.add_subparsers(dest='command', help='Command to run')
-    
+
+    # ── Thesis pipeline ──────────────────────────────────────────────
+    sleeve_parser = subparsers.add_parser(
+        'sleeve-backtest',
+        help='[THESIS] Run strategy-sleeve allocator backtest',
+    )
+    sleeve_parser.add_argument(
+        '--sleeve-returns',
+        help='Path to sleeve returns CSV (overrides config)',
+    )
+    sleeve_parser.add_argument(
+        '--walk-forward',
+        action='store_true',
+        help='Use walk-forward splits (train/val/test/holdout)',
+    )
+    sleeve_parser.set_defaults(func=cmd_sleeve_backtest)
+
+    # ── Legacy asset pipeline ────────────────────────────────────────
     # Backtest command
-    backtest_parser = subparsers.add_parser('backtest', help='Run backtest')
+    backtest_parser = subparsers.add_parser('backtest', help='[LEGACY] Run asset backtest')
     backtest_parser.add_argument('--assets', nargs='+', help='Asset tickers')
     backtest_parser.add_argument('--start-date', help='Start date (YYYY-MM-DD)')
     backtest_parser.add_argument('--end-date', help='End date (YYYY-MM-DD)')
