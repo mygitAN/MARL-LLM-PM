@@ -6,6 +6,16 @@ from gymnasium import spaces
 from typing import Dict, Tuple, Optional
 import pandas as pd
 
+from ..constants import EPSILON
+
+
+def safe_normalize(weights: np.ndarray) -> np.ndarray:
+    """Normalise weights to sum to 1; falls back to equal weights on degenerate input."""
+    total = weights.sum()
+    if total == 0 or not np.isfinite(total):
+        return np.ones_like(weights) / len(weights)
+    return weights / total
+
 
 class PortfolioEnv(gym.Env):
     """
@@ -104,7 +114,7 @@ class PortfolioEnv(gym.Env):
         """
         # Normalize action to valid weights
         action = np.clip(action, 0, 1)
-        action = action / (action.sum() + 1e-8)
+        action = safe_normalize(action)
         
         # Calculate transaction costs
         weight_changes = np.abs(action - self.portfolio_weights)
@@ -114,7 +124,7 @@ class PortfolioEnv(gym.Env):
         if self.current_step < len(self.price_history) - 1:
             current_prices = self.price_history.iloc[self.current_step].values
             next_prices = self.price_history.iloc[self.current_step + 1].values
-            returns = (next_prices - current_prices) / (current_prices + 1e-8)
+            returns = (next_prices - current_prices) / np.where(current_prices != 0, current_prices, EPSILON)
             
             # Portfolio return
             portfolio_return = np.dot(self.portfolio_weights, returns)
@@ -155,7 +165,7 @@ class PortfolioEnv(gym.Env):
         if self.current_step > 0:
             current_prices = self.price_history.iloc[self.current_step].values
             prev_prices = self.price_history.iloc[self.current_step - 1].values
-            returns = (current_prices - prev_prices) / (prev_prices + 1e-8)
+            returns = (current_prices - prev_prices) / np.where(prev_prices != 0, prev_prices, EPSILON)
             obs.extend(returns)
         else:
             obs.extend(np.zeros(self.n_assets))

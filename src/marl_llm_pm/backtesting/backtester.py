@@ -1,10 +1,23 @@
 """Backtesting framework with performance metrics."""
 
+import logging
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
+
+from ..constants import EPSILON
+
+logger = logging.getLogger(__name__)
+
+
+def safe_normalize(weights: np.ndarray) -> np.ndarray:
+    """Normalise weights to sum to 1; falls back to equal weights on degenerate input."""
+    total = weights.sum()
+    if total == 0 or not np.isfinite(total):
+        return np.ones_like(weights) / len(weights)
+    return weights / total
 
 
 @dataclass
@@ -199,16 +212,20 @@ class Backtester:
             next_prices = price_history.iloc[i].values
             
             # Calculate returns
-            price_returns = (next_prices - current_prices) / (current_prices + 1e-8)
-            
+            price_returns = (next_prices - current_prices) / np.where(
+                current_prices != 0, current_prices, EPSILON
+            )
+
             # Get new weights
             try:
                 observation = self._build_observation(price_history, i, portfolio_weights)
                 new_weights = weight_calculator(observation, **kwargs)
-                new_weights = np.clip(new_weights, 0, 1)
-                new_weights = new_weights / (new_weights.sum() + 1e-8)
+                new_weights = safe_normalize(np.clip(new_weights, 0, 1))
+            except (ValueError, RuntimeError) as e:
+                logger.warning(f"Weight calculation failed at step {i}: {e}. Holding previous weights.")
+                new_weights = portfolio_weights.copy()
             except Exception as e:
-                print(f"Error in weight calculation at step {i}: {e}")
+                logger.error(f"Unexpected error in weight calculator at step {i}: {e}", exc_info=True)
                 new_weights = portfolio_weights.copy()
             
             # Calculate transaction costs
@@ -254,7 +271,7 @@ class Backtester:
         if step > 0:
             current_prices = price_history.iloc[step].values
             prev_prices = price_history.iloc[step - 1].values
-            returns = (current_prices - prev_prices) / (prev_prices + 1e-8)
+            returns = (current_prices - prev_prices) / np.where(prev_prices != 0, prev_prices, EPSILON)
         else:
             returns = np.zeros(n_assets)
         

@@ -10,6 +10,7 @@ Examples:
 
 import argparse
 import logging
+import re
 from pathlib import Path
 from datetime import datetime, timedelta
 import sys
@@ -37,6 +38,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+_PROJECT_ROOT = Path(__file__).resolve().parent
+_TICKER_RE = re.compile(r'^[A-Z]{1,5}(\.[A-Z]{1,2})?$')
+
+
+def validate_config_path(config_arg: str) -> Path:
+    """Resolve config path and ensure it stays within the project and is a YAML file."""
+    path = Path(config_arg).resolve()
+    if path.suffix.lower() not in {'.yaml', '.yml'}:
+        raise ValueError(f"Config file must be a .yaml/.yml file, got: {path.suffix}")
+    if not str(path).startswith(str(_PROJECT_ROOT)):
+        raise ValueError(f"Config path must be inside the project directory: {path}")
+    return path
+
+
+def validate_ticker(ticker: str) -> str:
+    """Validate a single ticker symbol."""
+    if not _TICKER_RE.match(ticker):
+        raise ValueError(f"Invalid ticker symbol '{ticker}'. Expected 1-5 uppercase letters.")
+    return ticker
+
+
+def validate_date(date_str: str) -> str:
+    """Validate a date string in YYYY-MM-DD format."""
+    try:
+        datetime.strptime(date_str, '%Y-%m-%d')
+    except ValueError:
+        raise ValueError(f"Invalid date '{date_str}'. Expected format: YYYY-MM-DD")
+    return date_str
+
 
 def load_market_data(
     assets: list[str],
@@ -44,8 +74,8 @@ def load_market_data(
     end_date: str,
 ) -> pd.DataFrame:
     """Download market data using yfinance."""
-    logger.info(f"Downloading data for {', '.join(assets)}...")
-    
+    logger.info(f"Downloading data for {len(assets)} asset(s)...")
+
     data = yf.download(
         assets,
         start=start_date,
@@ -68,14 +98,26 @@ def cmd_backtest(args, config: ConfigManager) -> None:
     logger.info("Starting backtest...")
     
     # Get assets and dates
-    assets = args.assets or config.get('environment', 'assets')
-    start_date = args.start_date or (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
-    end_date = args.end_date or datetime.now().strftime('%Y-%m-%d')
-    
+    raw_assets = args.assets or config.get('environment', 'assets')
+    try:
+        assets = [validate_ticker(t) for t in raw_assets]
+    except ValueError as e:
+        logger.error(f"Invalid ticker: {e}")
+        return
+
+    raw_start = args.start_date or (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+    raw_end = args.end_date or datetime.now().strftime('%Y-%m-%d')
+    try:
+        start_date = validate_date(raw_start)
+        end_date = validate_date(raw_end)
+    except ValueError as e:
+        logger.error(f"Invalid date: {e}")
+        return
+
     # Load market data
     try:
         price_data = load_market_data(assets, start_date, end_date)
-    except Exception as e:
+    except (IOError, KeyError, ValueError) as e:
         logger.error(f"Failed to load market data: {e}")
         return
     
@@ -111,23 +153,26 @@ def cmd_backtest(args, config: ConfigManager) -> None:
     try:
         results = backtester.run(price_data, get_weights)
         logger.info("\n" + results.summary())
-        
+
         # Save results
         results_path = Path(config.get('logging', 'results_dir', './results'))
         results_path.mkdir(parents=True, exist_ok=True)
-        
+
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         results_file = results_path / f"backtest_{timestamp}.csv"
-        
+
         results_df = pd.DataFrame({
             'portfolio_value': results.portfolio_values,
             'returns': np.concatenate([[0], results.returns]),
         })
         results_df.to_csv(results_file, index=False)
         logger.info(f"Results saved to {results_file}")
-        
-    except Exception as e:
+
+    except (ValueError, RuntimeError) as e:
         logger.error(f"Backtest failed: {e}")
+    except Exception as e:
+        logger.critical(f"Unexpected error during backtest: {e}", exc_info=True)
+        raise
 
 
 def cmd_train(args, config: ConfigManager) -> None:
@@ -145,29 +190,43 @@ def cmd_analyze(args, config: ConfigManager) -> None:
         logger.error("LLM is disabled in configuration")
         return
     
-    assets = args.assets or config.get('environment', 'assets')
-    date = args.date or datetime.now().strftime('%Y-%m-%d')
-    
-    logger.info(f"Analyzing sentiment for {', '.join(assets)} on {date}...")
-    
+    raw_assets = args.assets or config.get('environment', 'assets')
+    try:
+        assets = [validate_ticker(t) for t in raw_assets]
+    except ValueError as e:
+        logger.error(f"Invalid ticker: {e}")
+        return
+
+    raw_date = args.date or datetime.now().strftime('%Y-%m-%d')
+    try:
+        date = validate_date(raw_date)
+    except ValueError as e:
+        logger.error(f"Invalid date: {e}")
+        return
+
+    logger.info(f"Analyzing sentiment for {len(assets)} asset(s) on {date}...")
+
     analyzer = SentimentAnalyzer(
         cache_dir=config.get('llm', 'cache_dir'),
         model=config.get('llm', 'model'),
         use_cache=config.get('llm', 'cache_enabled'),
     )
-    
+
     try:
         sentiments = analyzer.analyze_sentiment(assets, date)
-        
+
         # Display results
-        logger.info("\nSentiment Analysis Results:")
+        logger.info("Sentiment Analysis Results:")
         logger.info("-" * 40)
         for asset, score in sentiments.items():
             sentiment_text = "Bullish" if score > 0.5 else "Bearish" if score < 0.5 else "Neutral"
             logger.info(f"{asset:8s}: {score:.2f} ({sentiment_text})")
-        
-    except Exception as e:
+
+    except (ValueError, RuntimeError) as e:
         logger.error(f"Sentiment analysis failed: {e}")
+    except Exception as e:
+        logger.critical(f"Unexpected error during sentiment analysis: {e}", exc_info=True)
+        raise
 
 
 def cmd_test(args, config: ConfigManager) -> None:
@@ -183,9 +242,11 @@ def cmd_test(args, config: ConfigManager) -> None:
         cmd.append('--cov=src/marl_llm_pm')
     
     try:
-        result = subprocess.run(cmd, cwd=Path(__file__).parent)
+        result = subprocess.run(cmd, cwd=Path(__file__).parent, shell=False)
         sys.exit(result.returncode)
-    except Exception as e:
+    except FileNotFoundError as e:
+        logger.error(f"Test runner not found (is pytest installed?): {e}")
+    except OSError as e:
         logger.error(f"Test execution failed: {e}")
 
 
@@ -236,8 +297,12 @@ def main():
     
     args = parser.parse_args()
     
-    # Load configuration
-    config = ConfigManager(args.config)
+    # Validate and load configuration
+    try:
+        config_path = validate_config_path(args.config)
+    except ValueError as e:
+        parser.error(str(e))
+    config = ConfigManager(str(config_path))
     
     # Execute command
     if args.command is None:
