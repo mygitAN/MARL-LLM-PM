@@ -39,10 +39,7 @@ class MetaAllocator:
         Returns:
             weights: np.ndarray of length len(sleeve_names), summing to 1
         """
-        # Build alpha vector
         a = np.array([alphas.get(s, 0.5) for s in self.sleeve_names], dtype=float)
-        
-        # Stable softmax with temperature
         z = (a - a.max()) / max(self.temperature, 1e-6)
         w = np.exp(z)
         w = safe_simplex(w)

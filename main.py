@@ -22,7 +22,6 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-# Add src to path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 from marl_llm_pm import (
@@ -34,8 +33,6 @@ from marl_llm_pm import (
     BacktestResults,
     ConfigManager,
 )
-
-# Strategy allocator modules
 from marl_llm_pm.strategy_allocator.environment import StrategySleeveEnv
 from marl_llm_pm.strategy_allocator.agents import StrategyPreferenceAgent, collect_preferences
 from marl_llm_pm.strategy_allocator.orchestration import MetaAllocator
@@ -43,7 +40,6 @@ from marl_llm_pm.strategy_allocator.llm import RegimeInterpreter
 from marl_llm_pm.strategy_allocator.evaluation import proportional_walk_forward
 
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -80,36 +76,22 @@ def validate_date(date_str: str) -> str:
     return date_str
 
 
-def load_market_data(
-    assets: list[str],
-    start_date: str,
-    end_date: str,
-) -> pd.DataFrame:
-    """Download market data using yfinance."""
+def load_market_data(assets: list[str], start_date: str, end_date: str) -> pd.DataFrame:
+    """Download adjusted close prices via yfinance."""
     logger.info(f"Downloading data for {len(assets)} asset(s)...")
-
-    data = yf.download(
-        assets,
-        start=start_date,
-        end=end_date,
-        progress=False,
-    )
-    
-    # Handle single asset case
+    data = yf.download(assets, start=start_date, end=end_date, progress=False)
     if len(assets) == 1:
         data = data[['Close']].rename(columns={'Close': assets[0]})
     else:
         data = data['Close']
-    
     logger.info(f"Loaded {len(data)} days of data")
     return data
 
 
 def cmd_backtest(args, config: ConfigManager) -> None:
-    """Run backtest with configured parameters."""
+    """Run the legacy asset-level backtest."""
     logger.info("Starting backtest...")
-    
-    # Get assets and dates
+
     raw_assets = args.assets or config.get('environment', 'assets')
     try:
         assets = [validate_ticker(t) for t in raw_assets]
@@ -126,14 +108,12 @@ def cmd_backtest(args, config: ConfigManager) -> None:
         logger.error(f"Invalid date: {e}")
         return
 
-    # Load market data
     try:
         price_data = load_market_data(assets, start_date, end_date)
     except (IOError, KeyError, ValueError) as e:
         logger.error(f"Failed to load market data: {e}")
         return
-    
-    # Create environment
+
     env = PortfolioEnv(
         asset_names=assets,
         initial_portfolio_value=config.get('backtesting', 'initial_portfolio_value'),
@@ -141,8 +121,7 @@ def cmd_backtest(args, config: ConfigManager) -> None:
         transaction_cost=config.get('backtesting', 'transaction_cost'),
     )
     env.set_market_data(price_data)
-    
-    # Create agents
+
     agents = [
         DummyAgent(f"agent_{i}", n_assets=len(assets))
         for i in range(config.get('agents', 'n_agents'))
@@ -151,33 +130,27 @@ def cmd_backtest(args, config: ConfigManager) -> None:
         agents,
         aggregation_method=config.get('agents', 'aggregation_method')
     )
-    
-    # Weight calculator function
+
     def get_weights(observation):
         return coordinator.get_actions(observation)
-    
-    # Run backtest
+
     backtester = Backtester(
         initial_capital=config.get('backtesting', 'initial_capital'),
         transaction_cost=config.get('backtesting', 'transaction_cost'),
     )
-    
+
     try:
         results = backtester.run(price_data, get_weights)
         logger.info("\n" + results.summary())
 
-        # Save results
         results_path = Path(config.get('logging', 'results_dir', './results'))
         results_path.mkdir(parents=True, exist_ok=True)
-
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         results_file = results_path / f"backtest_{timestamp}.csv"
-
-        results_df = pd.DataFrame({
+        pd.DataFrame({
             'portfolio_value': results.portfolio_values,
             'returns': np.concatenate([[0], results.returns]),
-        })
-        results_df.to_csv(results_file, index=False)
+        }).to_csv(results_file, index=False)
         logger.info(f"Results saved to {results_file}")
 
     except (ValueError, RuntimeError) as e:
@@ -189,25 +162,21 @@ def cmd_backtest(args, config: ConfigManager) -> None:
 
 def cmd_backtest_sleeves(args, config: ConfigManager) -> None:
     """Run strategy-sleeve backtest.
-    
-    Pipeline:
-      Data (CSV) → Env → Agents (preferences) → Meta-allocator → Weights → PnL
+
+    Pipeline: Data (CSV) → Env → Agents (preferences) → Meta-allocator → Weights → PnL
     """
     logger.info("Starting strategy-sleeve backtest...")
-    
-    # Load configuration
+
     sleeves = config.get('environment', 'sleeves')
     tc = config.get('environment', 'transaction_cost')
     cap = config.get('environment', 'max_weight_per_sleeve')
     initial_capital = config.get('backtesting', 'initial_capital')
-    
     sleeve_csv = config.get('data', 'sleeve_returns_csv')
-    
+
     if not Path(sleeve_csv).exists():
         logger.error(f"Sleeve returns CSV not found: {sleeve_csv}")
         return
-    
-    # Load sleeve returns
+
     try:
         sleeve_returns = pd.read_csv(sleeve_csv, index_col=0, parse_dates=True)
         sleeve_returns = sleeve_returns.sort_index()
@@ -215,8 +184,7 @@ def cmd_backtest_sleeves(args, config: ConfigManager) -> None:
     except Exception as e:
         logger.error(f"Failed to load sleeve returns: {e}")
         return
-    
-    # Initialize environment
+
     try:
         env = StrategySleeveEnv(
             sleeve_names=sleeves,
@@ -229,35 +197,25 @@ def cmd_backtest_sleeves(args, config: ConfigManager) -> None:
     except Exception as e:
         logger.error(f"Failed to initialize environment: {e}")
         return
-    
-    # Initialize strategy agents
+
     agents = [StrategyPreferenceAgent(sleeve_name) for sleeve_name in sleeves]
-    
-    # Initialize meta-allocator
     allocator = MetaAllocator(sleeves, cap=cap, temperature=1.0)
-    
-    # Initialize regime interpreter
     regime = RegimeInterpreter(
         cache_dir=config.get('llm', 'cache_dir'),
         use_cache=config.get('llm', 'cache_enabled'),
         labels=config.get('llm', 'labels'),
     )
-    
-    # Run backtest loop
+
     values = []
     allocations = []
     regimes = []
-    preferences_log = []
-    
+
     env.reset()
-    prev_value = env.value
-    
+
     try:
         for t in range(len(sleeve_returns)):
-            # Build numeric metrics (rolling window)
-            window = sleeve_returns.iloc[max(0, t - 12) : t]
-            
-            # Compute metrics
+            window = sleeve_returns.iloc[max(0, t - 12): t]
+
             if len(window) > 2:
                 vol = float(window.mean(axis=1).std())
                 drawdown_cumsum = (1.0 + window.mean(axis=1)).cumprod() - 1.0
@@ -267,44 +225,28 @@ def cmd_backtest_sleeves(args, config: ConfigManager) -> None:
                 corr = float(corr_vals.mean().mean()) if len(corr_vals) > 1 else 0.0
             else:
                 vol, drawdown, trend, corr = 0.0, 0.0, 0.0, 0.0
-            
-            metrics = {
-                "vol": vol,
-                "drawdown": drawdown,
-                "trend": trend,
-                "corr": corr,
-            }
-            
-            # Classify regime
+
+            metrics = {"vol": vol, "drawdown": drawdown, "trend": trend, "corr": corr}
             regime_out = regime.classify(key=str(sleeve_returns.index[t].date()), metrics=metrics)
             regimes.append(regime_out.label)
-            
-            # Build observation
+
             obs = {
                 "regime_label": regime_out.label,
                 "sleeve_features": {
-                    s: {
-                        "signal": float(window[s].mean()) if len(window) > 2 else 0.0
-                    }
+                    s: {"signal": float(window[s].mean()) if len(window) > 2 else 0.0}
                     for s in sleeves
                 },
                 "global_features": metrics,
                 "prev_weights": env.w.copy(),
             }
-            
-            # Collect preferences from agents
+
             alphas = collect_preferences(agents, obs)
-            preferences_log.append(alphas)
-            
-            # Allocate weights
             w = allocator.allocate(alphas, obs)
-            
-            # Step environment
             reward, info, done = env.step(w)
-            
+
             values.append(info.portfolio_value)
             allocations.append(w.copy())
-            
+
             if t % 10 == 0:
                 logger.info(
                     f"[t={t:3d}] regime={regime_out.label:20s} "
@@ -312,21 +254,19 @@ def cmd_backtest_sleeves(args, config: ConfigManager) -> None:
                     f"weights={[f'{x:.2f}' for x in w]} "
                     f"turnover={info.turnover:.3f}"
                 )
-            
+
             if done:
                 break
-        
-        # Compute final metrics
+
         returns = np.array([
             (values[i] / values[i - 1]) - 1.0 if i > 0 else 0.0
             for i in range(len(values))
         ])
-        
         final_value = values[-1] if values else initial_capital
         total_return = (final_value / initial_capital) - 1.0
         annual_return = total_return * (config.get('environment', 'steps_per_year') / len(values)) if len(values) > 0 else 0.0
         annual_vol = float(returns.std() * np.sqrt(config.get('environment', 'steps_per_year'))) if len(returns) > 0 else 0.0
-        
+
         logger.info("\n" + "=" * 70)
         logger.info("STRATEGY-SLEEVE BACKTEST RESULTS")
         logger.info("=" * 70)
@@ -338,27 +278,23 @@ def cmd_backtest_sleeves(args, config: ConfigManager) -> None:
         if annual_vol > 0:
             logger.info(f"Sharpe Ratio (rf=0):   {annual_return / annual_vol:>8.2f}")
         logger.info("=" * 70)
-        
-        # Save results
+
         results_path = Path(config.get('logging', 'results_dir', './results'))
         results_path.mkdir(parents=True, exist_ok=True)
-        
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         results_file = results_path / f"sleeve_backtest_{timestamp}.csv"
-        
+
         results_df = pd.DataFrame({
             'date': sleeve_returns.index[:len(values)],
             'portfolio_value': values,
             'returns': returns,
             'regime': regimes,
         })
-        
         for i, sleeve in enumerate(sleeves):
             results_df[f'weight_{sleeve}'] = [alloc[i] for alloc in allocations]
-        
         results_df.to_csv(results_file, index=False)
         logger.info(f"\nResults saved to {results_file}")
-        
+
     except Exception as e:
         logger.error(f"Strategy-sleeve backtest failed: {e}", exc_info=True)
         raise
@@ -378,7 +314,7 @@ def cmd_analyze(args, config: ConfigManager) -> None:
     if not config.get('llm', 'enabled'):
         logger.error("LLM is disabled in configuration")
         return
-    
+
     raw_assets = args.assets or config.get('environment', 'assets')
     try:
         assets = [validate_ticker(t) for t in raw_assets]
@@ -394,7 +330,6 @@ def cmd_analyze(args, config: ConfigManager) -> None:
         return
 
     logger.info(f"Analyzing sentiment for {len(assets)} asset(s) on {date}...")
-
     analyzer = SentimentAnalyzer(
         cache_dir=config.get('llm', 'cache_dir'),
         model=config.get('llm', 'model'),
@@ -403,8 +338,6 @@ def cmd_analyze(args, config: ConfigManager) -> None:
 
     try:
         sentiments = analyzer.analyze_sentiment(assets, date)
-
-        # Display results
         logger.info("Sentiment Analysis Results:")
         logger.info("-" * 40)
         for asset, score in sentiments.items():
@@ -421,9 +354,9 @@ def cmd_analyze(args, config: ConfigManager) -> None:
 def _build_metrics(window: pd.DataFrame, lookback: int = 12) -> dict:
     """Compute rolling numeric metrics for regime classification."""
     avg = window.mean(axis=1)
-    vol      = float(avg.std())              if len(avg) > 2  else 0.0
-    trend    = float(avg.mean())             if len(avg) > 2  else 0.0
-    drawdown = float(avg.cumsum().min())     if len(avg) > 2  else 0.0
+    vol      = float(avg.std())          if len(avg) > 2 else 0.0
+    trend    = float(avg.mean())         if len(avg) > 2 else 0.0
+    drawdown = float(avg.cumsum().min()) if len(avg) > 2 else 0.0
     if window.shape[1] > 1 and len(window) > 3:
         corr = float(window.corr().values[window.corr().values != 1].mean())
     else:
@@ -450,10 +383,7 @@ def _run_sleeve_episode(
     env.set_sleeve_returns(sleeve_returns)
 
     agents = [
-        StrategyPreferenceAgent(
-            s,
-            bias=config.get('agents', f'{s.lower()}_bias') or 0.0,
-        )
+        StrategyPreferenceAgent(s, bias=config.get('agents', f'{s.lower()}_bias') or 0.0)
         for s in sleeves
     ]
     allocator = MetaAllocator(
@@ -508,7 +438,6 @@ def cmd_sleeve_backtest(args, config: ConfigManager) -> None:
     """Run the strategy-allocator sleeve backtest pipeline."""
     logger.info("Starting strategy-allocator sleeve backtest...")
 
-    # Load sleeve return data
     csv_path = Path(
         args.sleeve_returns or config.get('data', 'sleeve_returns_csv') or 'data/sleeve_returns.csv'
     ).resolve()
@@ -523,11 +452,11 @@ def cmd_sleeve_backtest(args, config: ConfigManager) -> None:
         logger.error(f"Failed to read sleeve returns: {e}")
         return
 
-    sleeves       = config.get('environment', 'sleeves') or ['MOMENTUM', 'VALUE', 'QUALITY']
-    tc            = config.get('environment', 'transaction_cost') or 0.001
-    cap           = config.get('environment', 'max_weight_per_sleeve') or 0.70
-    initial_cap   = config.get('backtesting', 'initial_capital') or 100_000.0
-    lookback      = config.get('regime', 'lookback_steps') or 12
+    sleeves     = config.get('environment', 'sleeves') or ['MOMENTUM', 'VALUE', 'QUALITY']
+    tc          = config.get('environment', 'transaction_cost') or 0.001
+    cap         = config.get('environment', 'max_weight_per_sleeve') or 0.70
+    initial_cap = config.get('backtesting', 'initial_capital') or 100_000.0
+    lookback    = config.get('regime', 'lookback_steps') or 12
 
     missing = [s for s in sleeves if s not in sleeve_returns.columns]
     if missing:
@@ -538,7 +467,6 @@ def cmd_sleeve_backtest(args, config: ConfigManager) -> None:
     logger.info(f"Loaded {len(sleeve_returns)} periods | sleeves: {sleeves}")
 
     if args.walk_forward:
-        # Walk-forward mode: train/val/test splits + sealed holdout
         eval_cfg = config.get('evaluation') or {}
         train_df, val_df, test_windows, holdout_df = proportional_walk_forward(
             sleeve_returns,
@@ -565,19 +493,17 @@ def cmd_sleeve_backtest(args, config: ConfigManager) -> None:
         logger.error("No results produced.")
         return
 
-    # Compute and display summary metrics
-    returns_arr = np.array(rets)
+    returns_arr    = np.array(rets)
     steps_per_year = config.get('environment', 'steps_per_year') or 52
-    ann_factor = steps_per_year ** 0.5
-
-    total_ret  = (values[-1] / initial_cap) - 1.0
-    ann_vol    = float(np.std(returns_arr)) * ann_factor
-    ann_ret    = float(np.mean(returns_arr)) * steps_per_year
-    sharpe     = (ann_ret / ann_vol) if ann_vol > 0 else 0.0
-    cum        = np.cumprod(1 + returns_arr)
-    peak       = np.maximum.accumulate(cum)
-    max_dd     = float(((cum - peak) / np.where(peak > 0, peak, 1)).min())
-    avg_w      = {s: float(np.mean([wh[s] for wh in weight_history])) for s in sleeves}
+    ann_factor     = steps_per_year ** 0.5
+    total_ret      = (values[-1] / initial_cap) - 1.0
+    ann_vol        = float(np.std(returns_arr)) * ann_factor
+    ann_ret        = float(np.mean(returns_arr)) * steps_per_year
+    sharpe         = (ann_ret / ann_vol) if ann_vol > 0 else 0.0
+    cum            = np.cumprod(1 + returns_arr)
+    peak           = np.maximum.accumulate(cum)
+    max_dd         = float(((cum - peak) / np.where(peak > 0, peak, 1)).min())
+    avg_w          = {s: float(np.mean([wh[s] for wh in weight_history])) for s in sleeves}
 
     logger.info("=" * 52)
     logger.info("STRATEGY-ALLOCATOR SLEEVE BACKTEST — RESULTS")
@@ -592,7 +518,6 @@ def cmd_sleeve_backtest(args, config: ConfigManager) -> None:
     logger.info(f"  Avg sleeve weights: { {k: f'{v:.1%}' for k, v in avg_w.items()} }")
     logger.info("=" * 52)
 
-    # Save results
     results_dir = Path('./results')
     results_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -608,15 +533,11 @@ def cmd_sleeve_backtest(args, config: ConfigManager) -> None:
 def cmd_test(args, config: ConfigManager) -> None:
     """Run pytest test suite."""
     import subprocess
-    
     logger.info("Running test suite...")
-    
     test_dir = Path(__file__).parent / 'tests'
     cmd = ['python', '-m', 'pytest', str(test_dir), '-v']
-    
     if args.coverage:
         cmd.append('--cov=src/marl_llm_pm')
-    
     try:
         result = subprocess.run(cmd, cwd=Path(__file__).parent, shell=False)
         sys.exit(result.returncode)
@@ -632,17 +553,14 @@ def main():
         description='Multi-Agent Reinforcement Learning with LLM for Portfolio Management',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''Examples:
-  # Strategy allocator pipeline (primary)
   python main.py sleeve-backtest --config configs/strategy_allocator.yaml
   python main.py sleeve-backtest --config configs/strategy_allocator.yaml --walk-forward
-
-  # Legacy asset pipeline
   python main.py backtest --assets AAPL GOOGL MSFT
   python main.py analyze --assets AAPL GOOGL --date 2024-01-15
   python main.py test --coverage
         '''
     )
-    
+
     parser.add_argument(
         '--config',
         default='configs/strategy_allocator.yaml',
@@ -651,61 +569,42 @@ def main():
 
     subparsers = parser.add_subparsers(dest='command', help='Command to run')
 
-    # ── Strategy-Allocator pipeline ──────────────────────────────────
-    sleeve_parser = subparsers.add_parser(
-        'sleeve-backtest',
-        help='Run strategy-sleeve allocator backtest',
-    )
-    sleeve_parser.add_argument(
-        '--sleeve-returns',
-        help='Path to sleeve returns CSV (overrides config)',
-    )
-    sleeve_parser.add_argument(
-        '--walk-forward',
-        action='store_true',
-        help='Use walk-forward splits (train/val/test/holdout)',
-    )
+    sleeve_parser = subparsers.add_parser('sleeve-backtest', help='Run strategy-sleeve allocator backtest')
+    sleeve_parser.add_argument('--sleeve-returns', help='Path to sleeve returns CSV (overrides config)')
+    sleeve_parser.add_argument('--walk-forward', action='store_true', help='Use walk-forward splits (train/val/test/holdout)')
     sleeve_parser.set_defaults(func=cmd_sleeve_backtest)
 
-    # ── Legacy asset pipeline ────────────────────────────────────────
-    # Backtest command
-    backtest_parser = subparsers.add_parser('backtest', help='[LEGACY] Run asset backtest')
+    sleeves_parser = subparsers.add_parser('backtest-sleeves', help='Run strategy-sleeve backtest (verbose)')
+    sleeves_parser.set_defaults(func=cmd_backtest_sleeves)
+
+    backtest_parser = subparsers.add_parser('backtest', help='Run legacy asset backtest')
     backtest_parser.add_argument('--assets', nargs='+', help='Asset tickers')
     backtest_parser.add_argument('--start-date', help='Start date (YYYY-MM-DD)')
     backtest_parser.add_argument('--end-date', help='End date (YYYY-MM-DD)')
     backtest_parser.set_defaults(func=cmd_backtest)
-    
-    # Strategy-sleeve backtest command
-    sleeves_parser = subparsers.add_parser('backtest-sleeves', help='Run strategy-sleeve backtest')
-    sleeves_parser.set_defaults(func=cmd_backtest_sleeves)
-    
-    # Train command
+
     train_parser = subparsers.add_parser('train', help='Train agents')
     train_parser.add_argument('--episodes', type=int, help='Number of episodes')
     train_parser.add_argument('--assets', nargs='+', help='Asset tickers')
     train_parser.set_defaults(func=cmd_train)
-    
-    # Analyze command
+
     analyze_parser = subparsers.add_parser('analyze', help='Analyze sentiment')
     analyze_parser.add_argument('--assets', nargs='+', help='Asset tickers')
     analyze_parser.add_argument('--date', help='Analysis date (YYYY-MM-DD)')
     analyze_parser.set_defaults(func=cmd_analyze)
-    
-    # Test command
+
     test_parser = subparsers.add_parser('test', help='Run tests')
     test_parser.add_argument('--coverage', action='store_true', help='Run with coverage')
     test_parser.set_defaults(func=cmd_test)
-    
+
     args = parser.parse_args()
-    
-    # Validate and load configuration
+
     try:
         config_path = validate_config_path(args.config)
     except ValueError as e:
         parser.error(str(e))
     config = ConfigManager(str(config_path))
-    
-    # Execute command
+
     if args.command is None:
         parser.print_help()
     else:

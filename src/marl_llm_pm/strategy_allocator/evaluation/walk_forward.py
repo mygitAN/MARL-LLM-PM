@@ -30,13 +30,11 @@ def proportional_walk_forward(
 
     df = df.sort_index()
 
-    # Extract holdout window (last N months)
     holdout_end = df.index.max()
     holdout_start = holdout_end - pd.DateOffset(months=holdout_months)
     dev_df = df[df.index < holdout_start]
     holdout_df = df[df.index >= holdout_start]
 
-    # Split dev into train/val/test
     n = len(dev_df)
     n_train = int(n * split_train)
     n_val = int(n * split_val)
@@ -45,7 +43,6 @@ def proportional_walk_forward(
     val_df = dev_df.iloc[n_train : n_train + n_val]
     test_df = dev_df.iloc[n_train + n_val :]
 
-    # Non-overlapping test windows
     windows = []
     start = test_df.index.min()
     end = test_df.index.max()

@@ -42,7 +42,6 @@ class AgentCoordinator:
         self.n_agents = len(agents)
         self.aggregation_method = aggregation_method
         
-        # Validate and set agent weights
         if weights is not None:
             assert len(weights) == self.n_agents, "Weights length must match agent count"
             assert np.isclose(weights.sum(), 1.0), "Weights must sum to 1"
@@ -76,7 +75,6 @@ class AgentCoordinator:
         else:
             raise ValueError(f"Unknown aggregation method: {self.aggregation_method}")
         
-        # Normalize and clip to ensure valid weights
         aggregated = np.clip(aggregated, 0, 1)
         aggregated = safe_normalize(aggregated)
         
@@ -142,10 +140,9 @@ class AgentCoordinator:
             ]
             weights_array = np.array(individual_weights)
             
-            # Calculate variance across agents per asset
             variance = np.var(weights_array, axis=0).mean()
-            
-            # Calculate pairwise differences
+
+            # Max L1 distance between any two agents
             max_pairwise_diff = 0.0
             for i in range(len(individual_weights)):
                 for j in range(i + 1, len(individual_weights)):

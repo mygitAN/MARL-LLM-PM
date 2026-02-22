@@ -82,10 +82,6 @@ class RegimeInterpreter:
                 logger.warning("anthropic package not installed; falling back to deterministic classifier.")
                 self.use_llm = False
 
-    # ------------------------------------------------------------------
-    # Cache I/O
-    # ------------------------------------------------------------------
-
     def _cache_path(self, key: str) -> Path:
         return self.cache_dir / f"regime_{key}.json"
 
@@ -113,10 +109,6 @@ class RegimeInterpreter:
             )
         except OSError as e:
             logger.warning(f"Could not write regime cache for '{key}': {e}")
-
-    # ------------------------------------------------------------------
-    # Classification
-    # ------------------------------------------------------------------
 
     def classify(self, key: str, metrics: Dict[str, float]) -> RegimeOutput:
         """

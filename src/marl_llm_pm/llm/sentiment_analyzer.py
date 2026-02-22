@@ -69,7 +69,6 @@ class SentimentAnalyzer:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             os.chmod(self.cache_dir, stat.S_IRWXU)
 
-        # Initialize Anthropic client and validate the key immediately
         self.client = anthropic.Anthropic(api_key=api_key)
         self._validate_api_key()
 
@@ -82,10 +81,6 @@ class SentimentAnalyzer:
         except anthropic.APIConnectionError:
             # Network unavailable — do not block init, will fail at query time
             logger.warning("Could not reach Anthropic API during init (network issue). Continuing.")
-
-    # ------------------------------------------------------------------
-    # Cache helpers
-    # ------------------------------------------------------------------
 
     def _get_cache_key(self, assets: List[str], date: Optional[str] = None) -> str:
         if date is None:
@@ -134,10 +129,6 @@ class SentimentAnalyzer:
             os.chmod(cache_file, stat.S_IRUSR | stat.S_IWUSR)  # 600
         except OSError as e:
             logger.warning(f"Error writing cache file {cache_file}: {e}")
-
-    # ------------------------------------------------------------------
-    # Core analysis
-    # ------------------------------------------------------------------
 
     def analyze_sentiment(
         self,
@@ -254,10 +245,6 @@ Respond with ONLY the JSON object, no other text."""
             logger.error(f"Error parsing sentiment response: {e}")
             return {asset: 0.5 for asset in assets}
 
-    # ------------------------------------------------------------------
-    # Batch analysis
-    # ------------------------------------------------------------------
-
     def batch_analyze(
         self,
         assets: List[str],
@@ -286,10 +273,6 @@ Respond with ONLY the JSON object, no other text."""
             current += timedelta(days=1)
 
         return results
-
-    # ------------------------------------------------------------------
-    # Cache management
-    # ------------------------------------------------------------------
 
     def clear_cache(self, days_old: int = 30) -> None:
         """Remove cache files older than `days_old` days."""

@@ -53,13 +53,12 @@ class PortfolioEnv(gym.Env):
         self.max_steps = max_steps
         self.transaction_cost = transaction_cost
         
-        # Environment state
         self.current_step = 0
         self.portfolio_value = initial_portfolio_value
         self.portfolio_weights = np.ones(self.n_assets) / self.n_assets
         self.price_history = None
         self.sentiment_scores = None
-        
+
         # Action space: weights for each asset (must sum to 1)
         self.action_space = spaces.Box(
             low=0.0, high=1.0, shape=(self.n_assets,), dtype=np.float32
@@ -112,35 +111,28 @@ class PortfolioEnv(gym.Env):
         Returns:
             observation, reward, terminated, truncated, info
         """
-        # Normalize action to valid weights
         action = np.clip(action, 0, 1)
         action = safe_normalize(action)
-        
-        # Calculate transaction costs
+
         weight_changes = np.abs(action - self.portfolio_weights)
         transaction_costs = self.portfolio_value * self.transaction_cost * weight_changes.sum()
-        
-        # Update portfolio value with price changes
+
         if self.current_step < len(self.price_history) - 1:
             current_prices = self.price_history.iloc[self.current_step].values
             next_prices = self.price_history.iloc[self.current_step + 1].values
             returns = (next_prices - current_prices) / np.where(current_prices != 0, current_prices, EPSILON)
-            
-            # Portfolio return
+
             portfolio_return = np.dot(self.portfolio_weights, returns)
             self.portfolio_value *= (1 + portfolio_return)
             self.portfolio_value -= transaction_costs
-            
-            # Reward: portfolio return minus transaction costs
+
             reward = float(portfolio_return - (transaction_costs / self.portfolio_value))
         else:
             reward = 0.0
-        
-        # Update weights
+
         self.portfolio_weights = action
         self.current_step += 1
-        
-        # Check termination
+
         terminated = self.current_step >= len(self.price_history) - 1
         truncated = self.current_step >= self.max_steps
         

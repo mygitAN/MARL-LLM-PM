@@ -80,11 +80,9 @@ class StrategySleeveEnv:
         if self.t >= len(self._returns):
             return 0.0, StepInfo(self.t, self.value, self.w.copy(), 0.0, 0.0), True
 
-        # Enforce constraints and simplex
         new_w = _safe_simplex(new_w)
         new_w = apply_cap_and_renormalize(new_w, self.cap)
 
-        # Turnover + transaction costs
         turnover = float(np.abs(new_w - self.w).sum())
         cost = self.value * self.tc * turnover
 
@@ -92,15 +90,12 @@ class StrategySleeveEnv:
         r_vec = self._returns.iloc[self.t].values.astype(float)
         sleeve_return = float(np.dot(self.w, r_vec))
 
-        # Update value
         self.value = self.value * (1.0 + sleeve_return) - cost
         self.value = max(self.value, 1.0)
         self._peak = max(self._peak, self.value)
 
-        # Reward: return minus normalized cost
         reward = sleeve_return - (cost / max(self.value, EPS))
 
-        # Commit weights and increment
         self.w = new_w
         self.t += 1
         done = self.t >= len(self._returns)
