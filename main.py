@@ -30,6 +30,13 @@ from marl_llm_pm import (
     ConfigManager,
 )
 
+# Strategy allocator modules
+from marl_llm_pm.strategy_allocator.environment import StrategySleeveEnv
+from marl_llm_pm.strategy_allocator.agents import StrategyPreferenceAgent, collect_preferences
+from marl_llm_pm.strategy_allocator.orchestration import MetaAllocator
+from marl_llm_pm.strategy_allocator.llm import RegimeInterpreter
+from marl_llm_pm.strategy_allocator.evaluation import proportional_walk_forward
+
 
 # Configure logging
 logging.basicConfig(
@@ -175,6 +182,183 @@ def cmd_backtest(args, config: ConfigManager) -> None:
         raise
 
 
+def cmd_backtest_sleeves(args, config: ConfigManager) -> None:
+    """Run strategy-sleeve backtest.
+    
+    Pipeline:
+      Data (CSV) → Env → Agents (preferences) → Meta-allocator → Weights → PnL
+    """
+    logger.info("Starting strategy-sleeve backtest...")
+    
+    # Load configuration
+    sleeves = config.get('environment', 'sleeves')
+    tc = config.get('environment', 'transaction_cost')
+    cap = config.get('environment', 'max_weight_per_sleeve')
+    initial_capital = config.get('backtesting', 'initial_capital')
+    
+    sleeve_csv = config.get('data', 'sleeve_returns_csv')
+    
+    if not Path(sleeve_csv).exists():
+        logger.error(f"Sleeve returns CSV not found: {sleeve_csv}")
+        return
+    
+    # Load sleeve returns
+    try:
+        sleeve_returns = pd.read_csv(sleeve_csv, index_col=0, parse_dates=True)
+        sleeve_returns = sleeve_returns.sort_index()
+        logger.info(f"Loaded sleeve returns: {sleeve_returns.shape}")
+    except Exception as e:
+        logger.error(f"Failed to load sleeve returns: {e}")
+        return
+    
+    # Initialize environment
+    try:
+        env = StrategySleeveEnv(
+            sleeve_names=sleeves,
+            transaction_cost=tc,
+            max_weight_per_sleeve=cap,
+            initial_value=initial_capital,
+        )
+        env.set_sleeve_returns(sleeve_returns)
+        logger.info(f"Environment initialized with sleeves: {sleeves}")
+    except Exception as e:
+        logger.error(f"Failed to initialize environment: {e}")
+        return
+    
+    # Initialize strategy agents
+    agents = [StrategyPreferenceAgent(sleeve_name) for sleeve_name in sleeves]
+    
+    # Initialize meta-allocator
+    allocator = MetaAllocator(sleeves, cap=cap, temperature=1.0)
+    
+    # Initialize regime interpreter
+    regime = RegimeInterpreter(
+        cache_dir=config.get('llm', 'cache_dir'),
+        use_cache=config.get('llm', 'cache_enabled'),
+        labels=config.get('llm', 'labels'),
+    )
+    
+    # Run backtest loop
+    values = []
+    allocations = []
+    regimes = []
+    preferences_log = []
+    
+    env.reset()
+    prev_value = env.value
+    
+    try:
+        for t in range(len(sleeve_returns)):
+            # Build numeric metrics (rolling window)
+            window = sleeve_returns.iloc[max(0, t - 12) : t]
+            
+            # Compute metrics
+            if len(window) > 2:
+                vol = float(window.mean(axis=1).std())
+                drawdown_cumsum = (1.0 + window.mean(axis=1)).cumprod() - 1.0
+                drawdown = float(drawdown_cumsum.min()) if len(drawdown_cumsum) > 0 else 0.0
+                trend = float(window.mean().mean())
+                corr_vals = window.corr()
+                corr = float(corr_vals.mean().mean()) if len(corr_vals) > 1 else 0.0
+            else:
+                vol, drawdown, trend, corr = 0.0, 0.0, 0.0, 0.0
+            
+            metrics = {
+                "vol": vol,
+                "drawdown": drawdown,
+                "trend": trend,
+                "corr": corr,
+            }
+            
+            # Classify regime
+            regime_out = regime.classify(key=str(sleeve_returns.index[t].date()), metrics=metrics)
+            regimes.append(regime_out.label)
+            
+            # Build observation
+            obs = {
+                "regime_label": regime_out.label,
+                "sleeve_features": {
+                    s: {
+                        "signal": float(window[s].mean()) if len(window) > 2 else 0.0
+                    }
+                    for s in sleeves
+                },
+                "global_features": metrics,
+                "prev_weights": env.w.copy(),
+            }
+            
+            # Collect preferences from agents
+            alphas = collect_preferences(agents, obs)
+            preferences_log.append(alphas)
+            
+            # Allocate weights
+            w = allocator.allocate(alphas, obs)
+            
+            # Step environment
+            reward, info, done = env.step(w)
+            
+            values.append(info.portfolio_value)
+            allocations.append(w.copy())
+            
+            if t % 10 == 0:
+                logger.info(
+                    f"[t={t:3d}] regime={regime_out.label:20s} "
+                    f"value=${info.portfolio_value:12.2f} "
+                    f"weights={[f'{x:.2f}' for x in w]} "
+                    f"turnover={info.turnover:.3f}"
+                )
+            
+            if done:
+                break
+        
+        # Compute final metrics
+        returns = np.array([
+            (values[i] / values[i - 1]) - 1.0 if i > 0 else 0.0
+            for i in range(len(values))
+        ])
+        
+        final_value = values[-1] if values else initial_capital
+        total_return = (final_value / initial_capital) - 1.0
+        annual_return = total_return * (config.get('environment', 'steps_per_year') / len(values)) if len(values) > 0 else 0.0
+        annual_vol = float(returns.std() * np.sqrt(config.get('environment', 'steps_per_year'))) if len(returns) > 0 else 0.0
+        
+        logger.info("\n" + "=" * 70)
+        logger.info("STRATEGY-SLEEVE BACKTEST RESULTS")
+        logger.info("=" * 70)
+        logger.info(f"Initial Capital:       ${initial_capital:,.2f}")
+        logger.info(f"Final Value:           ${final_value:,.2f}")
+        logger.info(f"Total Return:          {total_return:>8.2%}")
+        logger.info(f"Annualized Return:     {annual_return:>8.2%}")
+        logger.info(f"Annualized Volatility: {annual_vol:>8.2%}")
+        if annual_vol > 0:
+            logger.info(f"Sharpe Ratio (rf=0):   {annual_return / annual_vol:>8.2f}")
+        logger.info("=" * 70)
+        
+        # Save results
+        results_path = Path(config.get('logging', 'results_dir', './results'))
+        results_path.mkdir(parents=True, exist_ok=True)
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        results_file = results_path / f"sleeve_backtest_{timestamp}.csv"
+        
+        results_df = pd.DataFrame({
+            'date': sleeve_returns.index[:len(values)],
+            'portfolio_value': values,
+            'returns': returns,
+            'regime': regimes,
+        })
+        
+        for i, sleeve in enumerate(sleeves):
+            results_df[f'weight_{sleeve}'] = [alloc[i] for alloc in allocations]
+        
+        results_df.to_csv(results_file, index=False)
+        logger.info(f"\nResults saved to {results_file}")
+        
+    except Exception as e:
+        logger.error(f"Strategy-sleeve backtest failed: {e}", exc_info=True)
+        raise
+
+
 def cmd_train(args, config: ConfigManager) -> None:
     """Train agents on historical data."""
     logger.info("Training not yet implemented")
@@ -257,6 +441,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''Examples:
   python main.py backtest --assets AAPL GOOGL MSFT
+  python main.py backtest-sleeves --config configs/sleeves.yaml
   python main.py analyze --assets AAPL GOOGL --date 2024-01-15
   python main.py test --coverage
   python main.py train --episodes 100
@@ -277,6 +462,10 @@ def main():
     backtest_parser.add_argument('--start-date', help='Start date (YYYY-MM-DD)')
     backtest_parser.add_argument('--end-date', help='End date (YYYY-MM-DD)')
     backtest_parser.set_defaults(func=cmd_backtest)
+    
+    # Strategy-sleeve backtest command
+    sleeves_parser = subparsers.add_parser('backtest-sleeves', help='Run strategy-sleeve backtest')
+    sleeves_parser.set_defaults(func=cmd_backtest_sleeves)
     
     # Train command
     train_parser = subparsers.add_parser('train', help='Train agents')
