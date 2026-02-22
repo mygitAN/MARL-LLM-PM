@@ -1,0 +1,51 @@
+# Strategy-Sleeve Allocator Pipeline Configuration
+# -------------------------------------------------
+# Primary configuration for multi-sleeve strategy allocation with regime interpretation.
+# Use configs/default.yaml for the legacy asset-level pipeline.
+
+environment:
+  sleeves: [MOMENTUM, VALUE, QUALITY]
+  transaction_cost: 0.001
+  max_weight_per_sleeve: 0.70        # mandate-style hard cap
+  initial_capital: 100000.0
+  rebalance_frequency: "weekly"      # daily | weekly | monthly
+  steps_per_year: 52                 # 52 = weekly, 252 = daily
+
+llm:
+  enabled: false                     # set true to use Claude for regime classification
+  mode: "regime_interpreter"         # fixed for strategy allocator — never "sentiment"
+  use_llm: false                     # false = deterministic rule-based classifier
+  model: "claude-3-5-sonnet-20241022"
+  cache_enabled: true
+  cache_dir: ".cache/regimes"
+  deterministic: true                # temperature=0 when LLM is used
+
+regime:
+  labels:
+    - "TRENDING-LOWVOL"
+    - "STRESS-DRAWDOWN"
+    - "RECOVERY"
+    - "SIDEWAYS-HIGHCORR"
+    - "RISK-OFF-DEFENSIVE"
+  lookback_steps: 12                 # rolling window for metric computation
+
+evaluation:
+  split_train: 0.60
+  split_val: 0.20
+  split_test: 0.20
+  test_interval_months: 6
+  holdout_months: 12
+
+backtesting:
+  initial_capital: 100000.0
+
+data:
+  sleeve_returns_csv: "data/sleeve_returns.csv"
+  market_features_csv: ""            # optional; leave empty if not using
+
+agents:
+  temperature: 1.0                   # meta-allocator softmax temperature
+  # bias per sleeve (additive to preference signal, 0 = neutral)
+  momentum_bias: 0.0
+  value_bias: 0.0
+  quality_bias: 0.0
