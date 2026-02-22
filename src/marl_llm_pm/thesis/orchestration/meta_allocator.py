@@ -79,7 +79,6 @@ class MetaAllocator:
             [alphas.get(s, 0.5) for s in self.sleeve_names],
             dtype=float,
         )
-        # Numerically stable softmax with temperature
         z = (a - a.max()) / self.temperature
         w = np.exp(z)
         w = _safe_simplex(w)

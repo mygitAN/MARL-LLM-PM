@@ -80,7 +80,6 @@ class RegimeInterpreter:
         trend = float(metrics.get("trend", 0.0))
         corr = float(metrics.get("corr", 0.0))
 
-        # Deterministic classification rules
         if dd < -0.12 and vol > 0.20:
             label = "STRESS-DRAWDOWN"
             expl = f"High stress: drawdown={dd:.2%}, vol={vol:.2f}."

@@ -57,42 +57,38 @@ class BacktestResults:
         if len(self.returns) == 0:
             return
         
-        # Basic return metrics
         self.total_return = float((self.portfolio_values[-1] / self.portfolio_values[0]) - 1)
-        
+
         # Annualization (assume 252 trading days)
         trading_days = len(self.returns)
         years = trading_days / 252.0
-        
+
         if years > 0:
             self.annualized_return = float(
                 (1 + self.total_return) ** (1 / years) - 1
             )
-        
-        # Volatility
+
         self.annualized_volatility = float(
             np.std(self.returns, ddof=1) * np.sqrt(252)
         )
-        
+
         # Sharpe Ratio (assuming 0% risk-free rate)
         if self.annualized_volatility > 0:
             self.sharpe_ratio = float(
                 self.annualized_return / self.annualized_volatility
             )
-        
-        # Maximum Drawdown
+
         cumulative = np.cumprod(1 + self.returns)
         running_max = np.maximum.accumulate(cumulative)
         drawdowns = (cumulative - running_max) / running_max
         self.max_drawdown = float(drawdowns.min())
         self.cumulative_max_drawdown = float(drawdowns.min())
-        
-        # Calmar Ratio
+
         if abs(self.max_drawdown) > 1e-6:
             self.calmar_ratio = float(
                 self.annualized_return / abs(self.max_drawdown)
             )
-        
+
         # Sortino Ratio (downside volatility)
         downside_returns = self.returns[self.returns < 0]
         if len(downside_returns) > 0:
@@ -103,12 +99,10 @@ class BacktestResults:
                 self.sortino_ratio = float(
                     self.annualized_return / downside_vol
                 )
-        
-        # Win Rate
+
         winning_days = np.sum(self.returns > 0)
         self.win_rate = float(winning_days / len(self.returns))
-        
-        # Alpha & Beta (vs benchmark)
+
         if self.benchmark_returns is not None and len(self.benchmark_returns) == len(self.returns):
             covariance = np.cov(self.returns, self.benchmark_returns)[0, 1]
             benchmark_var = np.var(self.benchmark_returns, ddof=1)
@@ -198,25 +192,21 @@ class Backtester:
         Returns:
             BacktestResults object with performance metrics
         """
-        # Validate inputs
         if len(price_history) < 2:
             raise ValueError("Price history must have at least 2 data points")
-        
+
         portfolio_values = [self.initial_capital]
         portfolio_weights = np.ones(len(price_history.columns)) / len(price_history.columns)
         returns_list = []
-        
-        # Backtest loop
+
         for i in range(1, len(price_history)):
             current_prices = price_history.iloc[i-1].values
             next_prices = price_history.iloc[i].values
-            
-            # Calculate returns
+
             price_returns = (next_prices - current_prices) / np.where(
                 current_prices != 0, current_prices, EPSILON
             )
 
-            # Get new weights
             try:
                 observation = self._build_observation(price_history, i, portfolio_weights)
                 new_weights = weight_calculator(observation, **kwargs)
@@ -227,20 +217,17 @@ class Backtester:
             except Exception as e:
                 logger.error(f"Unexpected error in weight calculator at step {i}: {e}", exc_info=True)
                 new_weights = portfolio_weights.copy()
-            
-            # Calculate transaction costs
+
             weight_diff = np.abs(new_weights - portfolio_weights)
             transaction_cost_amt = portfolio_values[-1] * self.transaction_cost * weight_diff.sum()
-            
-            # Calculate portfolio return
+
             portfolio_return = np.dot(portfolio_weights, price_returns)
             new_value = portfolio_values[-1] * (1 + portfolio_return) - transaction_cost_amt
-            
-            portfolio_values.append(max(new_value, 1))  # Ensure positive value
+
+            portfolio_values.append(max(new_value, 1))  # floor NAV at 1
             returns_list.append(portfolio_return)
             portfolio_weights = new_weights
-        
-        # Create results
+
         returns_array = np.array(returns_list)
         portfolio_values_array = np.array(portfolio_values)
         
@@ -275,7 +262,6 @@ class Backtester:
         else:
             returns = np.zeros(n_assets)
         
-        # Simple observation: [returns, weights]
         observation = np.concatenate([returns, current_weights, [np.log(step + 1)]])
         return observation.astype(np.float32)
     
@@ -286,29 +272,24 @@ class Backtester:
     ) -> Dict[str, float]:
         """Calculate performance metrics from returns."""
         metrics = {}
-        
-        # Annualization
+
         trading_days = len(returns)
         years = trading_days / 252.0
-        
-        # Return metrics
+
         total_return = np.prod(1 + returns) - 1
         metrics['total_return'] = float(total_return)
-        
+
         if years > 0:
             metrics['annualized_return'] = float((1 + total_return) ** (1 / years) - 1)
-        
-        # Volatility
+
         volatility = np.std(returns, ddof=1)
         metrics['annualized_volatility'] = float(volatility * np.sqrt(252))
-        
-        # Sharpe
+
         if metrics['annualized_volatility'] > 0:
             metrics['sharpe_ratio'] = float(
                 (metrics['annualized_return'] - risk_free_rate) / metrics['annualized_volatility']
             )
-        
-        # Drawdown
+
         cumulative = np.cumprod(1 + returns)
         running_max = np.maximum.accumulate(cumulative)
         drawdowns = (cumulative - running_max) / running_max
