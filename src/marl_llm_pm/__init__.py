@@ -1,62 +1,67 @@
-"""
-Multi-Agent Reinforcement Learning with LLM for Portfolio Management
+"""MARL-LLM Portfolio Management Framework.
 
-Thesis pipeline (strategy-sleeve allocator) — primary:
-- StrategySleeveEnv       — sleeve return simulator (PnL/costs only)
-- StrategyPreferenceAgent — emits alpha_t in [0,1] per sleeve
-- MetaAllocator           — converts alphas to w_t with mandate caps
-- RegimeInterpreter       — closed-label numeric regime classifier
-- proportional_walk_forward — thesis-aligned train/val/test/holdout splits
+This repo supports two related workflows:
 
-Legacy pipeline (kept for reference):
-- PortfolioEnv, AgentCoordinator, SentimentAnalyzer, Backtester
+1) A *classic* portfolio RL environment + agents + backtesting.
+2) A *thesis-aligned* strategy sleeve allocator (factor rotation).
+
+Some modules depend on optional heavy packages (e.g., `gymnasium`). To keep
+lightweight utilities (like CSV builders) usable even when those dependencies
+aren't installed yet, we guard most top-level imports.
 """
 
-__version__ = "0.2.0"
-__author__ = "MARL-LLM-PM Team"
+__version__ = "0.1.0"
+__author__ = "Abulele Nxitywa"
 
-# Legacy pipeline
-from .environment import PortfolioEnv
-from .agents import BaseAgent, DummyAgent, AgentCoordinator
-from .llm import SentimentAnalyzer
-from .backtesting import BacktestResults, Backtester
+__all__: list[str] = [
+    "__version__",
+    "__author__",
+    "ConfigManager",
+]
+
 from .config import ConfigManager
 
-# Thesis pipeline
-from .thesis import (
-    StrategySleeveEnv,
-    StepInfo,
-    StrategyPreferenceAgent,
-    PreferenceOutput,
-    collect_preferences,
-    MetaAllocator,
-    RegimeInterpreter,
-    RegimeOutput,
-    LABELS,
-    proportional_walk_forward,
-    SplitWindow,
-)
 
-__all__ = [
-    # Legacy
-    'PortfolioEnv',
-    'BaseAgent',
-    'DummyAgent',
-    'AgentCoordinator',
-    'SentimentAnalyzer',
-    'BacktestResults',
-    'Backtester',
-    'ConfigManager',
-    # Thesis
-    'StrategySleeveEnv',
-    'StepInfo',
-    'StrategyPreferenceAgent',
-    'PreferenceOutput',
-    'collect_preferences',
-    'MetaAllocator',
-    'RegimeInterpreter',
-    'RegimeOutput',
-    'LABELS',
-    'proportional_walk_forward',
-    'SplitWindow',
-]
+# -----------------------------
+# Thesis-aligned strategy layer
+# -----------------------------
+try:
+    from .strategy_allocator import (
+        StrategySleeveEnv,
+        StrategySelectorAgent,
+        MetaAllocator,
+        RegimeInterpreter,
+    )
+
+    __all__ += [
+        "StrategySleeveEnv",
+        "StrategySelectorAgent",
+        "MetaAllocator",
+        "RegimeInterpreter",
+    ]
+except Exception:
+    # If optional deps for the strategy layer are missing, keep base utilities importable.
+    pass
+
+
+# -----------------------------
+# Legacy multi-asset RL layer
+# -----------------------------
+try:
+    from .environment import PortfolioEnv
+    from .agents import BaseAgent, DummyAgent, AgentCoordinator
+    from .llm import SentimentAnalyzer
+    from .backtesting import Backtester, BacktestResults
+
+    __all__ += [
+        "PortfolioEnv",
+        "BaseAgent",
+        "DummyAgent",
+        "AgentCoordinator",
+        "SentimentAnalyzer",
+        "Backtester",
+        "BacktestResults",
+    ]
+except Exception:
+    # Most commonly: gymnasium not installed yet.
+    pass

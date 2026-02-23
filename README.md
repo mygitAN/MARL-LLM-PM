@@ -109,6 +109,47 @@ python main.py analyze --assets AAPL GOOGL --date 2024-01-15
 python main.py test --coverage
 ```
 
+## 🎓 Thesis: Strategy Sleeve Allocator (Factor Rotation)
+
+If you're using this repo for **strategy sleeve rotation** (e.g., Momentum / Value / Quality sleeves),
+the `strategy_allocator` package expects a **wide CSV of sleeve returns** like:
+
+- `data/sleeve_returns.csv`
+
+### 1) Get sleeve index *levels*
+
+Start with provider **factor/strategy indices** (recommended for the proposal stage).
+Export daily index levels to a wide CSV shaped like `data/factor_index_levels_example.csv`:
+
+```text
+date,MOMENTUM,VALUE,QUALITY
+2024-01-02,100.0,100.0,100.0
+...
+```
+
+### 2) Convert levels → returns
+
+```bash
+python main.py build-sleeve-returns \
+  --prices-csv data/factor_index_levels_example.csv \
+  --out-csv data/sleeve_returns.csv \
+  --method simple
+```
+
+### 3) Optional: build deterministic features
+
+```bash
+python main.py build-strategy-features \
+  --sleeve-returns-csv data/sleeve_returns.csv \
+  --out-csv data/strategy_features.csv
+```
+
+### 4) Run sleeve backtest
+
+```bash
+python main.py sleeve-backtest --config configs/strategy_allocator.yaml
+```
+
 ## 📖 Usage Examples
 
 ### Using PortfolioEnv Directly
