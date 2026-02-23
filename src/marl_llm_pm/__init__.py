@@ -15,12 +15,18 @@ Legacy pipeline (kept for reference):
 __version__ = "0.2.0"
 __author__ = "MARL-LLM-PM Team"
 
-# Legacy pipeline
-from .environment import PortfolioEnv
-from .agents import BaseAgent, DummyAgent, AgentCoordinator
-from .llm import SentimentAnalyzer
-from .backtesting import BacktestResults, Backtester
+# ConfigManager has no heavy dependencies — always available
 from .config import ConfigManager
+
+# Legacy pipeline — depends on gymnasium; import lazily so data utilities
+# can be used in environments where gymnasium is not installed.
+try:
+    from .environment import PortfolioEnv
+    from .agents import BaseAgent, DummyAgent, AgentCoordinator
+    from .llm import SentimentAnalyzer
+    from .backtesting import BacktestResults, Backtester
+except Exception:
+    pass
 
 # Thesis pipeline
 from .thesis import (
