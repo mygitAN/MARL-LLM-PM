@@ -1,11 +1,14 @@
 # Multi-Agent Reinforcement Learning with LLM for Portfolio Management
 
-A framework for building intelligent portfolio management systems that allocate across **strategy sleeves** rather than individual assets, combining:
+A thesis research framework for **strategy-sleeve allocation** on the South African equity market. The system allocates across factor-strategy sleeves (Momentum, Value, Quality) rather than individual securities, using multi-agent RL with an LLM-assisted regime interpreter.
 
+**Thesis core** (`strategy_allocator/`):
 - **Multi-Agent RL** — one agent per strategy sleeve, each emitting a preference signal α ∈ [0,1]
 - **Meta-Allocator** — converts preference signals to portfolio weights via temperature-scaled softmax with mandate-style caps
-- **LLM Regime Interpreter** — closed-label market regime classifier (deterministic rules + optional Claude)
+- **LLM Regime Interpreter** — closed-label market regime classifier (deterministic rules + optional Claude at temperature=0)
 - **Walk-Forward Evaluation** — proportional train/val/test/holdout splits with sealed holdout
+
+**Legacy code** (`environment/`, `agents/`, `llm/`, `backtesting/`) — asset-level pipeline retained for reference; not part of the thesis.
 
 ---
 
@@ -110,6 +113,69 @@ python main.py backtest --assets AAPL GOOGL MSFT --start-date 2023-01-01 --end-d
 ```bash
 python main.py test --coverage
 ```
+
+---
+
+## Data
+
+### Sleeve returns format
+
+The pipeline expects a CSV with a `DatetimeIndex` and one column per sleeve:
+
+```
+date,MOMENTUM,VALUE,QUALITY
+2015-01-02,0.0031,-0.0012,0.0008
+2015-01-09,-0.0045,0.0027,-0.0019
+...
+```
+
+Place the file at `data/sleeve_returns.csv` (or override via `data.sleeve_returns_csv` in config).
+
+### Synthetic placeholder
+
+`data/sleeve_returns.csv` ships with **522 weeks of synthetic returns** (2015–2024) generated with a basic AR(1) structure plus a simulated Covid stress window (Feb–Mar 2020). Use this for development and unit tests only.
+
+### Real data — South African equity factor indices (Bloomberg)
+
+For the thesis, replace the synthetic file with total-return data pulled from Bloomberg Terminal using the following tickers. Pull **weekly** frequency from **2015-01-01** onwards.
+
+| Sleeve | Bloomberg ticker | Series | Note |
+|--------|-----------------|--------|------|
+| **VALUE** | `J330 <Index>` | JSE Value Index — Total Return | ZAR-denominated |
+| **QUALITY** | `SPSAQZT <Index>` | S&P SA Quality Total Return Index | ZAR-denominated |
+| **MOMENTUM** | `NFEMOM SJ <Equity>` | NewFunds Equity Momentum ETF | Pull **Total Return / NAV** field, not Last Price |
+
+> **Bloomberg download note:** For ETF tickers (e.g. NFEMOM SJ), use the `TOT_RETURN_INDEX_GROSS_DVDS` field rather than `PX_LAST` to ensure dividends are reinvested, matching the index methodology.
+
+#### Bloomberg BDH example (Excel / API)
+
+```
+=BDH("J330 Index",    "TOT_RETURN_INDEX_GROSS_DVDS", "20150101", "20241231", "Per=W", "Fill=P")
+=BDH("SPSAQZT Index", "TOT_RETURN_INDEX_GROSS_DVDS", "20150101", "20241231", "Per=W", "Fill=P")
+=BDH("NFEMOM SJ Equity", "TOT_RETURN_INDEX_GROSS_DVDS", "20150101", "20241231", "Per=W", "Fill=P")
+```
+
+Convert index levels to period returns before saving:
+
+```python
+import pandas as pd
+
+df = pd.read_csv('bloomberg_levels.csv', index_col=0, parse_dates=True)
+returns = df.pct_change().dropna()
+returns.columns = ['MOMENTUM', 'VALUE', 'QUALITY']
+returns.to_csv('data/sleeve_returns.csv')
+```
+
+### Regime metrics derivation
+
+All four regime metrics are computed from the sleeve returns directly — no separate macro data required:
+
+| Metric | Derivation |
+|--------|-----------|
+| `vol` | Rolling 12-week std of equal-weight sleeve average |
+| `trend` | Rolling 12-week mean of equal-weight sleeve average |
+| `drawdown` | Min of rolling 12-week cumulative sum of the average |
+| `corr` | Mean of the 3×3 pairwise correlation matrix over the window |
 
 ---
 
@@ -292,11 +358,12 @@ pytest tests/ -v
 
 ---
 
-## Legacy Asset Pipeline
+## Legacy Asset Pipeline (out of thesis scope)
 
-The asset-level pipeline (`PortfolioEnv`, `AgentCoordinator`, `SentimentAnalyzer`, `Backtester`) remains available for individual-security experiments:
+The asset-level pipeline (`PortfolioEnv`, `AgentCoordinator`, `SentimentAnalyzer`, `Backtester`) pre-dates the sleeve architecture and is **not part of the thesis**. It is retained for reference and potential future work (e.g. individual-security MARL, sentiment-augmented allocation).
 
 ```bash
+# Not used in the thesis — sleeve-backtest is the primary entry point
 python main.py backtest --assets AAPL GOOGL MSFT
 python main.py analyze --assets AAPL GOOGL --date 2024-01-15
 ```
