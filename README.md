@@ -1,107 +1,109 @@
 # Multi-Agent Reinforcement Learning with LLM for Portfolio Management
 
-A sophisticated framework for building intelligent portfolio management systems combining:
-- **Multi-Agent Reinforcement Learning** for distributed decision-making across assets
-- **Large Language Models** (Claude) for market sentiment analysis with daily caching
-- **Gymnasium-compatible Environment** for realistic portfolio operations
-- **Advanced Backtesting** with comprehensive performance metrics (Sharpe, Drawdown, etc.)
+A framework for building intelligent portfolio management systems that allocate across **strategy sleeves** rather than individual assets, combining:
 
-## 🎯 Features
+- **Multi-Agent RL** — one agent per strategy sleeve, each emitting a preference signal α ∈ [0,1]
+- **Meta-Allocator** — converts preference signals to portfolio weights via temperature-scaled softmax with mandate-style caps
+- **LLM Regime Interpreter** — closed-label market regime classifier (deterministic rules + optional Claude)
+- **Walk-Forward Evaluation** — proportional train/val/test/holdout splits with sealed holdout
 
-### Environment: `PortfolioEnv`
-- **Gymnasium-compliant** interface for standard RL workflows
-- Multi-asset portfolio management (customizable assets)
-- Realistic transaction costs and rebalancing mechanics
-- Observation space includes price returns, sentiment signals, current weights, and portfolio metrics
+---
 
-### Agents: `BaseAgent` & `AgentCoordinator`
-- **Abstract base agent interface** for implementing custom decision-making strategies
-- **DummyAgent** for baseline equal-weight comparison
-- **AgentCoordinator** aggregates decisions from multiple agents using:
-  - Mean aggregation
-  - Median aggregation
-  - Weighted aggregation with configurable agent weights
-- Ensemble diversity metrics for analyzing agent disagreement
+## Architecture
 
-### LLM Layer: `SentimentAnalyzer`
-- **Claude-powered sentiment analysis** using Anthropic API
-- **Daily caching** to minimize API calls and costs
-- Analyzes market sentiment on configurable 1-N scale
-- Batch analysis for multiple assets
-- Automatic cache cleanup for old entries
+The primary pipeline operates on **strategy sleeves** (pre-computed return streams such as factor indices or backtested strategies), not on individual securities.
 
-### Backtesting: `Backtester` & `BacktestResults`
-Performance metrics include:
-- **Return metrics**: Total return, annualized return
-- **Risk metrics**: Volatility, maximum drawdown, Calmar ratio
-- **Risk-adjusted returns**: Sharpe ratio, Sortino ratio
-- **Relative performance**: Alpha and Beta vs. benchmark
-- **Trade metrics**: Win rate, transaction cost analysis
+```
+Sleeve Returns CSV (MOMENTUM, VALUE, QUALITY, ...)
+    ↓
+StrategySleeveEnv  — PnL / cost accounting only
+    ↓
+Rolling window metrics  →  RegimeInterpreter  →  regime label (closed set)
+    ↓
+┌── StrategyPreferenceAgent (MOMENTUM) ──┐
+├── StrategyPreferenceAgent (VALUE)    ──┤  →  MetaAllocator  →  w_t ∈ simplex (capped)
+└── StrategyPreferenceAgent (QUALITY)  ──┘
+    ↓
+StrategySleeveEnv.step(w_t)  →  reward, NAV
+    ↓
+Walk-Forward Evaluation  →  Performance Metrics
+```
 
-### Configuration: `ConfigManager`
-- Centralized YAML configuration management
-- Pre-defined config sections for environment, agents, LLM, backtesting, and training
-- Easy override of hyperparameters
-- Default configuration in `configs/default.yaml`
+### Component Responsibilities
 
-## 📦 Project Structure
+| Component | Responsibility |
+|-----------|----------------|
+| **StrategySleeveEnv** | Simulate PnL and transaction costs; no feature engineering |
+| **StrategyPreferenceAgent** | Emit α ∈ [0,1] from sleeve-level signal; drop-in RL target |
+| **MetaAllocator** | Temperature-scaled softmax → simplex projection → per-sleeve cap |
+| **RegimeInterpreter** | Deterministic 5-label classifier; optional LLM at temperature=0 |
+| **proportional_walk_forward** | Sealed holdout + rolling test windows |
+
+---
+
+## Project Structure
 
 ```
 MARL-LLM-PM/
-├── src/marl_llm_pm/           # Main package
-│   ├── environment/           # PortfolioEnv implementation
-│   ├── agents/               # Agent base classes and coordinator
-│   ├── llm/                  # Claude sentiment analyzer
-│   ├── backtesting/          # Backtesting engine
-│   └── config/               # Configuration management
-├── tests/                     # Pytest test suite
-├── configs/                   # Configuration files
-├── main.py                    # CLI entry point
-├── requirements.txt           # Python dependencies
-├── .gitignore                 # Git ignore rules
-└── README.md                  # This file
+├── src/marl_llm_pm/
+│   ├── strategy_allocator/        # Primary pipeline
+│   │   ├── environment/           # StrategySleeveEnv
+│   │   ├── agents/                # StrategyPreferenceAgent, collect_preferences
+│   │   ├── orchestration/         # MetaAllocator
+│   │   ├── llm/                   # RegimeInterpreter
+│   │   └── evaluation/            # proportional_walk_forward
+│   ├── thesis/                    # Reference implementation (same structure)
+│   ├── environment/               # Legacy: PortfolioEnv (Gymnasium, asset-level)
+│   ├── agents/                    # Legacy: BaseAgent, DummyAgent, AgentCoordinator
+│   ├── llm/                       # Legacy: SentimentAnalyzer
+│   ├── backtesting/               # Legacy: Backtester, BacktestResults
+│   ├── config/                    # ConfigManager
+│   └── constants.py               # Shared constants
+├── configs/
+│   ├── strategy_allocator.yaml    # Primary config
+│   └── default.yaml               # Legacy asset pipeline config
+├── data/
+│   └── sleeve_returns.csv         # Weekly sleeve returns (MOMENTUM, VALUE, QUALITY)
+├── tests/
+├── main.py                        # CLI entry point
+└── requirements.txt
 ```
 
-## 🚀 Getting Started
+---
+
+## Getting Started
 
 ### Installation
 
-1. **Clone the repository:**
-   ```bash
-   cd MARL-LLM-PM
-   ```
+```bash
+git clone https://github.com/mygitAN/MARL-LLM-PM.git
+cd MARL-LLM-PM
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
 
-2. **Create a virtual environment (recommended):**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+Set the Anthropic API key only if using the LLM regime interpreter:
 
-3. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Set up API key:**
-   ```bash
-   export ANTHROPIC_API_KEY='your-api-key-here'
-   ```
+```bash
+export ANTHROPIC_API_KEY='your-api-key-here'
+```
 
 ### Quick Start
 
-**Run a backtest with default configuration:**
+**Run strategy-sleeve backtest (primary):**
 ```bash
-python main.py backtest
+python main.py sleeve-backtest --config configs/strategy_allocator.yaml
 ```
 
-**Backtest with custom assets and dates:**
+**Run with walk-forward splits (train/val/test/holdout):**
 ```bash
-python main.py backtest --assets AAPL GOOGL MSFT NVDA --start-date 2023-06-01 --end-date 2024-12-31
+python main.py sleeve-backtest --config configs/strategy_allocator.yaml --walk-forward
 ```
 
-**Analyze market sentiment (requires API key):**
+**Run legacy asset-level backtest:**
 ```bash
-python main.py analyze --assets AAPL GOOGL --date 2024-01-15
+python main.py backtest --assets AAPL GOOGL MSFT --start-date 2023-01-01 --end-date 2024-12-31
 ```
 
 **Run test suite:**
@@ -109,260 +111,208 @@ python main.py analyze --assets AAPL GOOGL --date 2024-01-15
 python main.py test --coverage
 ```
 
-## 📖 Usage Examples
+---
 
-### Using PortfolioEnv Directly
+## Usage Examples
+
+### Strategy-Sleeve Backtest
 
 ```python
 import pandas as pd
-from marl_llm_pm import PortfolioEnv
+from marl_llm_pm.strategy_allocator.environment import StrategySleeveEnv
+from marl_llm_pm.strategy_allocator.agents import StrategyPreferenceAgent, collect_preferences
+from marl_llm_pm.strategy_allocator.orchestration import MetaAllocator
+from marl_llm_pm.strategy_allocator.llm import RegimeInterpreter
 
-# Create environment
-env = PortfolioEnv(
-    asset_names=['AAPL', 'GOOGL', 'MSFT'],
-    initial_portfolio_value=100000.0,
-    max_steps=252,  # 1 trading year
-)
+sleeves = ['MOMENTUM', 'VALUE', 'QUALITY']
 
-# Set market data
-price_data = pd.DataFrame(...)  # Your price data
-env.set_market_data(price_data)
+# Load pre-computed sleeve returns
+sleeve_returns = pd.read_csv('data/sleeve_returns.csv', index_col=0, parse_dates=True)
 
-# Reset and interact
-obs, info = env.reset()
-for step in range(252):
-    action = agent.get_action(obs)  # Your agent decision
-    obs, reward, terminated, truncated, info = env.step(action)
-    if terminated or truncated:
-        break
-```
-
-### Using AgentCoordinator
-
-```python
-from marl_llm_pm import DummyAgent, AgentCoordinator
-
-# Create agents
-agents = [
-    DummyAgent(f"agent_{i}", n_assets=3)
-    for i in range(3)
-]
-
-# Create coordinator with mean aggregation
-coordinator = AgentCoordinator(
-    agents,
-    aggregation_method="mean",
-    weights=[0.33, 0.33, 0.34]  # Agent importance weights
-)
-
-# Get aggregated decision
-observation = env.reset()[0]
-portfolio_weights = coordinator.get_actions(observation)
-```
-
-### Using SentimentAnalyzer
-
-```python
-from marl_llm_pm import SentimentAnalyzer
-
-analyzer = SentimentAnalyzer(
-    cache_dir=".cache/sentiment",
-    model="claude-3-5-sonnet-20241022",
-)
-
-# Analyze sentiment (cached daily)
-sentiments = analyzer.analyze_sentiment(
-    assets=['AAPL', 'GOOGL', 'MSFT'],
-    date='2024-01-15'
-)
-# Returns: {'AAPL': 0.7, 'GOOGL': 0.5, 'MSFT': 0.8} (0-1 scale)
-```
-
-### Running Backtests
-
-```python
-from marl_llm_pm import Backtester
-import pandas as pd
-
-backtester = Backtester(
-    initial_capital=100000.0,
+# Environment: simulates PnL and transaction costs
+env = StrategySleeveEnv(
+    sleeve_names=sleeves,
     transaction_cost=0.001,
+    max_weight_per_sleeve=0.70,   # mandate cap per sleeve
+    initial_value=100_000.0,
+)
+env.set_sleeve_returns(sleeve_returns)
+
+# One preference agent per sleeve
+agents = [StrategyPreferenceAgent(s) for s in sleeves]
+
+# Meta-allocator: alphas → constrained weights via temperature-scaled softmax
+allocator = MetaAllocator(sleeves, cap=0.70, temperature=1.0)
+
+# Regime interpreter: deterministic 5-label classifier (optional LLM at temperature=0)
+regime = RegimeInterpreter(cache_dir='.cache/regimes', use_cache=True)
+
+env.reset()
+for t in range(len(sleeve_returns)):
+    window = sleeve_returns.iloc[max(0, t - 12): t]
+
+    avg = window.mean(axis=1)
+    metrics = {
+        'vol':      float(avg.std())            if len(avg) > 2 else 0.0,
+        'trend':    float(avg.mean())           if len(avg) > 2 else 0.0,
+        'drawdown': float(avg.cumsum().min())   if len(avg) > 2 else 0.0,
+        'corr':     float(window.corr().mean().mean()) if len(window) > 3 else 0.0,
+    }
+    reg = regime.classify(key=str(sleeve_returns.index[t].date()), metrics=metrics)
+
+    obs = {
+        'regime_label': reg.label,
+        'sleeve_features': {
+            s: {'signal': float(window[s].mean()) if len(window) > 2 else 0.0}
+            for s in sleeves
+        },
+        'global_features': metrics,
+        'prev_weights': env.w.copy(),
+    }
+
+    alphas = collect_preferences(agents, obs)   # {sleeve: alpha ∈ [0,1]}
+    w = allocator.allocate(alphas, obs)          # weights on simplex, capped
+    reward, info, done = env.step(w)
+
+    if done:
+        break
+
+print(f"Final NAV: £{info.portfolio_value:,.2f}")
+```
+
+### Walk-Forward Evaluation
+
+```python
+from marl_llm_pm.strategy_allocator.evaluation import proportional_walk_forward
+
+train_df, val_df, test_windows, holdout_df = proportional_walk_forward(
+    sleeve_returns,
+    split_train=0.60,
+    split_val=0.20,
+    split_test=0.20,
+    test_interval_months=6,
+    holdout_months=12,      # sealed — do not touch until final evaluation
 )
 
-# Price data with datetime index
-price_data = pd.DataFrame(...)
-
-# Weight calculator function
-def get_weights(observation):
-    return coordinator.get_actions(observation)
-
-# Run backtest
-results = backtester.run(price_data, get_weights)
-
-# Print summary
-print(results.summary())
-
-# Access metrics
-print(f"Sharpe Ratio: {results.sharpe_ratio:.2f}")
-print(f"Max Drawdown: {results.max_drawdown:.2%}")
+print(f"Train: {len(train_df)} | Val: {len(val_df)} | "
+      f"Test windows: {len(test_windows)} | Holdout: {len(holdout_df)}")
 ```
 
-## ⚙️ Configuration
+### Implementing a Custom Preference Agent
 
-Edit `configs/default.yaml` to customize:
-
-```yaml
-environment:
-  assets: [AAPL, GOOGL, MSFT, NVDA, TSLA]
-  initial_portfolio_value: 100000.0
-  transaction_cost: 0.001
-
-agents:
-  n_agents: 3
-  aggregation_method: "mean"
-
-llm:
-  enabled: true
-  model: "claude-3-5-sonnet-20241022"
-  cache_enabled: true
-  
-backtesting:
-  initial_capital: 100000.0
-  transaction_cost: 0.001
-```
-
-## 🧪 Testing
-
-Run the test suite:
-
-```bash
-# Basic tests
-python main.py test
-
-# With coverage report
-python main.py test --coverage
-
-# Direct pytest
-pytest tests/ -v
-```
-
-Tests cover:
-- Environment correctness (reset, step, observation space)
-- Action normalization and constraint satisfaction
-- Transaction cost application
-- Portfolio value evolution
-- Agent interface and coordination
-- Weight aggregation methods
-
-## 🏗️ Architecture Overview
-
-### Information Flow
-
-```
-Market Data (yfinance)
-    ↓
-PortfolioEnv (Observation)
-    ↓
-┌── Agent 1 ──┐
-├── Agent 2 ──┤→ AgentCoordinator → Portfolio Weights
-└── Agent 3 ──┘
-    ↓
-[Optional: SentimentAnalyzer → Sentiment Scores]
-    ↓
-PortfolioEnv (Step) → Reward Calculation
-    ↓
-Backtester → Performance Metrics
-```
-
-### Component Responsibilities
-
-| Component | Responsibility |
-|-----------|-----------------|
-| **PortfolioEnv** | Simulate portfolio operations with realistic constraints |
-| **BaseAgent** | Define decision-making interface |
-| **AgentCoordinator** | Aggregate multi-agent decisions |
-| **SentimentAnalyzer** | Provide LLM-based market insights |
-| **Backtester** | Evaluate strategy performance |
-| **ConfigManager** | Centralize configuration |
-
-## 📊 Performance Metrics Explained
-
-- **Sharpe Ratio**: Risk-adjusted returns (higher is better)
-  - Formula: (Annual Return - Risk-Free Rate) / Annual Volatility
-  
-- **Max Drawdown**: Maximum peak-to-trough decline
-  - Indicates worst-case loss scenario
-  
-- **Sortino Ratio**: Like Sharpe but penalizes only downside volatility
-  - Useful for strategies with frequent small losses
-  
-- **Calmar Ratio**: Annual return / Max drawdown
-  - Combines returns and risk management
-  
-- **Alpha**: Excess return vs. benchmark
-  - Positive alpha = outperformance
-
-- **Beta**: Correlation with benchmark
-  - <1: Less volatile than benchmark
-  - >1: More volatile than benchmark
-
-## 🔄 Extending the Framework
-
-### Implement Custom Agent
+The `StrategyPreferenceAgent` interface is designed as a drop-in target for a learned RL policy:
 
 ```python
-from marl_llm_pm import BaseAgent
-import numpy as np
+from marl_llm_pm.strategy_allocator.agents import PreferenceOutput
+from typing import Dict
 
-class MyCustomAgent(BaseAgent):
-    def get_action(self, observation: np.ndarray) -> np.ndarray:
-        # Implement your decision logic
-        return np.ones(self.n_assets) / self.n_assets
-    
-    def update(self, observation, action, reward, next_observation, done):
-        # Implement learning logic here
-        self.step_count += 1
+class MyRLAgent:
+    def __init__(self, sleeve_name: str):
+        self.sleeve_name = sleeve_name
+
+    def get_preference(self, obs: Dict) -> PreferenceOutput:
+        feats = obs.get('sleeve_features', {}).get(self.sleeve_name, {})
+        alpha = my_policy(feats)   # learned policy returning float in [0, 1]
+        return PreferenceOutput(sleeve=self.sleeve_name, alpha=alpha)
 ```
-
-### Integrate Sentiment Signals
-
-```python
-sentiment_scores = analyzer.analyze_sentiment(assets, date)
-
-# Adjust weights based on sentiment
-for i, asset in enumerate(assets):
-    weights[i] *= (1 + sentiment_scores[asset])
-
-weights /= weights.sum()  # Re-normalize
-```
-
-## 📋 Requirements
-
-- Python 3.9+
-- gymnasium >= 0.27.0
-- anthropic >= 0.25.0
-- pandas >= 1.3.0
-- numpy >= 1.21.0
-- yfinance >= 0.2.0
-- pyyaml >= 6.0
-
-## 📝 License
-
-MIT License
-
-## 🤝 Contributing
-
-Contributions welcome! Areas for enhancement:
-- Additional agent implementations (DQN, PPO, A3C)
-- More sophisticated weight aggregation methods
-- Real-time sentiment analysis
-- Multi-objective optimization
-- Additional backtesting metrics
-
-## 📧 Support
-
-For issues, questions, or suggestions, please open an issue on the repository.
 
 ---
 
-**Happy portfolio optimization! 📈**
+## Regime Labels
+
+The `RegimeInterpreter` uses a fixed closed vocabulary of 5 labels, classified from rolling numeric metrics (vol, drawdown, trend, correlation). The LLM path is optional and temperature-locked to 0.
+
+| Label | Trigger conditions |
+|-------|--------------------|
+| `TRENDING-LOWVOL` | trend > 8%, vol < 15% |
+| `STRESS-DRAWDOWN` | drawdown < −12%, vol > 20% |
+| `RECOVERY` | trend > 0%, drawdown > −5%, vol < 20% |
+| `SIDEWAYS-HIGHCORR` | corr > 60%, abs(trend) < 3% |
+| `RISK-OFF-DEFENSIVE` | default (none of the above) |
+
+---
+
+## Configuration
+
+`configs/strategy_allocator.yaml`:
+
+```yaml
+environment:
+  sleeves: [MOMENTUM, VALUE, QUALITY]
+  transaction_cost: 0.001
+  max_weight_per_sleeve: 0.70
+  steps_per_year: 52          # weekly rebalancing
+
+regime:
+  labels:
+    - TRENDING-LOWVOL
+    - STRESS-DRAWDOWN
+    - RECOVERY
+    - SIDEWAYS-HIGHCORR
+    - RISK-OFF-DEFENSIVE
+  lookback_steps: 12
+
+evaluation:
+  split_train: 0.60
+  split_val:   0.20
+  split_test:  0.20
+  test_interval_months: 6
+  holdout_months: 12
+
+llm:
+  use_llm: false              # true = Claude at temperature=0
+  cache_enabled: true
+  cache_dir: .cache/regimes
+
+data:
+  sleeve_returns_csv: data/sleeve_returns.csv
+```
+
+---
+
+## Performance Metrics
+
+| Metric | Description |
+|--------|-------------|
+| **Sharpe Ratio** | `(Ann. Return − rf) / Ann. Vol`; rf = 0 by default |
+| **Sortino Ratio** | Like Sharpe, but denominator uses downside volatility only |
+| **Max Drawdown** | Maximum peak-to-trough decline |
+| **Calmar Ratio** | `Ann. Return / abs(Max Drawdown)` |
+| **Alpha / Beta** | Excess return and market correlation vs. benchmark |
+
+---
+
+## Testing
+
+```bash
+python main.py test
+python main.py test --coverage
+pytest tests/ -v
+```
+
+---
+
+## Legacy Asset Pipeline
+
+The asset-level pipeline (`PortfolioEnv`, `AgentCoordinator`, `SentimentAnalyzer`, `Backtester`) remains available for individual-security experiments:
+
+```bash
+python main.py backtest --assets AAPL GOOGL MSFT
+python main.py analyze --assets AAPL GOOGL --date 2024-01-15
+```
+
+---
+
+## Requirements
+
+- Python 3.9+
+- numpy >= 1.21.0
+- pandas >= 1.3.0
+- gymnasium >= 0.27.0
+- anthropic >= 0.25.0
+- yfinance >= 0.2.0
+- pyyaml >= 6.0
+
+## License
+
+MIT License
