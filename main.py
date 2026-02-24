@@ -6,10 +6,6 @@ Strategy-allocator pipeline (primary):
     python main.py sleeve-backtest --config configs/strategy_allocator.yaml
     python main.py sleeve-backtest --config configs/strategy_allocator.yaml --walk-forward
 
-Data utilities:
-    python main.py build-sleeve-returns --prices-csv bloomberg_levels.csv --out-csv data/sleeve_returns.csv
-    python main.py build-strategy-features --sleeve-returns-csv data/sleeve_returns.csv --out-csv data/features.csv
-
 Legacy asset pipeline:
     python main.py backtest --config configs/default.yaml --assets AAPL GOOGL MSFT
     python main.py analyze --assets AAPL GOOGL --date 2024-01-15
@@ -43,7 +39,7 @@ from marl_llm_pm.strategy_allocator.orchestration import MetaAllocator
 from marl_llm_pm.strategy_allocator.llm import RegimeInterpreter
 from marl_llm_pm.strategy_allocator.evaluation import proportional_walk_forward
 from marl_llm_pm.strategy_allocator.data import SleeveReturnsBuildSpec, build_sleeve_returns_csv
-from marl_llm_pm.strategy_allocator.features import StrategyFeatureSpec, build_strategy_features
+from marl_llm_pm.strategy_allocator.features import build_strategy_features
 
 
 logging.basicConfig(
@@ -537,14 +533,7 @@ def cmd_sleeve_backtest(args, config: ConfigManager) -> None:
 
 
 def cmd_build_sleeve_returns(args, config: ConfigManager) -> None:
-    """Convert Bloomberg index-level CSV to sleeve returns CSV."""
-    prices_csv = args.prices_csv
-    out_csv = args.out_csv or config.get('data', 'sleeve_returns_csv') or 'data/sleeve_returns.csv'
-
-    if not Path(prices_csv).exists():
-        logger.error(f"Prices CSV not found: {prices_csv}")
-        return
-
+    """Build `data/sleeve_returns.csv` from a CSV of factor index *levels* (prices)."""
     spec = SleeveReturnsBuildSpec(
         date_col=args.date_col,
         method=args.method,
@@ -552,61 +541,42 @@ def cmd_build_sleeve_returns(args, config: ConfigManager) -> None:
         min_history_rows=args.min_rows,
     )
 
-    sleeves = args.sleeves if args.sleeves else None
-
-    try:
-        out_path = build_sleeve_returns_csv(
-            index_levels_csv=prices_csv,
-            out_csv=out_csv,
-            sleeves=sleeves,
-            spec=spec,
-        )
-        logger.info(f"Sleeve returns written to {out_path}")
-    except (FileNotFoundError, ValueError) as e:
-        logger.error(f"Failed to build sleeve returns: {e}")
-    except Exception as e:
-        logger.critical(f"Unexpected error: {e}", exc_info=True)
-        raise
+    out_path = build_sleeve_returns_csv(
+        index_levels_csv=args.prices_csv,
+        out_csv=args.out_csv,
+        sleeves=args.sleeves,
+        spec=spec,
+    )
+    logger.info(f"✅ Built sleeve returns: {out_path}")
 
 
 def cmd_build_strategy_features(args, config: ConfigManager) -> None:
-    """Build deterministic strategy features from sleeve returns."""
-    sleeve_csv = args.sleeve_returns_csv or config.get('data', 'sleeve_returns_csv') or 'data/sleeve_returns.csv'
-    out_csv = args.out_csv or 'data/strategy_features.csv'
+    """Build deterministic strategy features from sleeve returns (optional macro CSV)."""
+    sleeve = pd.read_csv(args.sleeve_returns_csv)
+    if args.date_col not in sleeve.columns:
+        raise ValueError(
+            f"date_col='{args.date_col}' not found in sleeve returns columns: {list(sleeve.columns)}"
+        )
+    sleeve[args.date_col] = pd.to_datetime(sleeve[args.date_col])
+    sleeve = sleeve.set_index(args.date_col).sort_index()
 
-    if not Path(sleeve_csv).exists():
-        logger.error(f"Sleeve returns CSV not found: {sleeve_csv}")
-        return
+    macro = None
+    if args.macro_csv:
+        macro = pd.read_csv(args.macro_csv)
+        if args.date_col not in macro.columns:
+            raise ValueError(
+                f"date_col='{args.date_col}' not found in macro columns: {list(macro.columns)}"
+            )
+        macro[args.date_col] = pd.to_datetime(macro[args.date_col])
+        macro = macro.set_index(args.date_col).sort_index()
 
-    try:
-        sleeve_returns = pd.read_csv(sleeve_csv, index_col=0, parse_dates=True)
-        sleeve_returns = sleeve_returns.sort_index()
-    except (OSError, ValueError) as e:
-        logger.error(f"Failed to read sleeve returns: {e}")
-        return
-
-    macro_df = None
-    if args.macro_csv and Path(args.macro_csv).exists():
-        try:
-            macro_df = pd.read_csv(args.macro_csv, index_col=0, parse_dates=True)
-            macro_df = macro_df.sort_index()
-            logger.info(f"Loaded macro features: {macro_df.shape}")
-        except (OSError, ValueError) as e:
-            logger.warning(f"Could not load macro CSV, skipping: {e}")
-
-    spec = StrategyFeatureSpec()
-
-    try:
-        features = build_strategy_features(sleeve_returns, macro_features=macro_df, spec=spec)
-        out_path = Path(out_csv).resolve()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        features.to_csv(out_path)
-        logger.info(f"Strategy features written to {out_path} ({features.shape})")
-    except ValueError as e:
-        logger.error(f"Failed to build strategy features: {e}")
-    except Exception as e:
-        logger.critical(f"Unexpected error: {e}", exc_info=True)
-        raise
+    feats = build_strategy_features(sleeve, macro_features=macro)
+    out_path = Path(args.out_csv)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    feats.to_csv(out_path, index_label="date")
+    logger.info(
+        f"✅ Built strategy features: {out_path}  (rows={len(feats)}, cols={feats.shape[1]})"
+    )
 
 
 def cmd_test(args, config: ConfigManager) -> None:
@@ -634,8 +604,6 @@ def main():
         epilog='''Examples:
   python main.py sleeve-backtest --config configs/strategy_allocator.yaml
   python main.py sleeve-backtest --config configs/strategy_allocator.yaml --walk-forward
-  python main.py build-sleeve-returns --prices-csv bloomberg_levels.csv --out-csv data/sleeve_returns.csv
-  python main.py build-strategy-features --sleeve-returns-csv data/sleeve_returns.csv --out-csv data/features.csv
   python main.py backtest --assets AAPL GOOGL MSFT
   python main.py analyze --assets AAPL GOOGL --date 2024-01-15
   python main.py test --coverage
@@ -655,28 +623,28 @@ def main():
     sleeve_parser.add_argument('--walk-forward', action='store_true', help='Use walk-forward splits (train/val/test/holdout)')
     sleeve_parser.set_defaults(func=cmd_sleeve_backtest)
 
-    bsr_parser = subparsers.add_parser(
+    build_sleeves_parser = subparsers.add_parser(
         'build-sleeve-returns',
-        help='Convert Bloomberg index-level CSV to sleeve returns CSV',
+        help='Build sleeve returns CSV from factor index *levels* (prices) CSV'
     )
-    bsr_parser.add_argument('--prices-csv', required=True, help='Path to Bloomberg index-levels CSV')
-    bsr_parser.add_argument('--out-csv', help='Output path for sleeve returns CSV (default: data/sleeve_returns.csv)')
-    bsr_parser.add_argument('--date-col', default='date', help='Name of the date column (default: date)')
-    bsr_parser.add_argument('--method', default='simple', choices=['simple', 'log'], help='Return calculation method (default: simple)')
-    bsr_parser.add_argument('--dropna', default='any', choices=['any', 'all'], help='dropna strategy (default: any)')
-    bsr_parser.add_argument('--min-rows', type=int, default=30, help='Minimum required output rows (default: 30)')
-    bsr_parser.add_argument('--sleeves', nargs='+', help='Column names to retain (default: all)')
-    bsr_parser.set_defaults(func=cmd_build_sleeve_returns)
+    build_sleeves_parser.add_argument('--prices-csv', required=True, help='Input CSV with index levels (wide format)')
+    build_sleeves_parser.add_argument('--out-csv', default='data/sleeve_returns.csv', help='Output sleeve returns CSV')
+    build_sleeves_parser.add_argument('--date-col', default='date', help='Date column name in input CSV')
+    build_sleeves_parser.add_argument('--method', choices=['simple', 'log'], default='simple', help='Return method')
+    build_sleeves_parser.add_argument('--dropna', choices=['any', 'all'], default='any', help='Row-wise NaN drop policy')
+    build_sleeves_parser.add_argument('--min-rows', type=int, default=30, help='Minimum rows after cleaning')
+    build_sleeves_parser.add_argument('--sleeves', nargs='*', default=None, help='Optional sleeve column subset')
+    build_sleeves_parser.set_defaults(func=cmd_build_sleeve_returns)
 
-    bsf_parser = subparsers.add_parser(
+    build_features_parser = subparsers.add_parser(
         'build-strategy-features',
-        help='Build deterministic strategy features from sleeve returns',
+        help='Build deterministic features from sleeve returns (optional macro features)'
     )
-    bsf_parser.add_argument('--sleeve-returns-csv', help='Path to sleeve returns CSV (overrides config)')
-    bsf_parser.add_argument('--macro-csv', help='Optional macro/exogenous features CSV')
-    bsf_parser.add_argument('--out-csv', help='Output path for features CSV (default: data/strategy_features.csv)')
-    bsf_parser.add_argument('--date-col', default='date', help='Name of the date column (default: date)')
-    bsf_parser.set_defaults(func=cmd_build_strategy_features)
+    build_features_parser.add_argument('--sleeve-returns-csv', default='data/sleeve_returns.csv', help='Input sleeve returns CSV')
+    build_features_parser.add_argument('--macro-csv', default=None, help='Optional macro/regime feature CSV')
+    build_features_parser.add_argument('--out-csv', default='data/strategy_features.csv', help='Output feature CSV')
+    build_features_parser.add_argument('--date-col', default='date', help='Date column name in CSVs')
+    build_features_parser.set_defaults(func=cmd_build_strategy_features)
 
     sleeves_parser = subparsers.add_parser('backtest-sleeves', help='Run strategy-sleeve backtest (verbose)')
     sleeves_parser.set_defaults(func=cmd_backtest_sleeves)
