@@ -1,6 +1,6 @@
 # MARL-LLM Portfolio Management: Equity Strategy Rotation
 
-A thesis-oriented framework for **factor / strategy sleeve rotation** using Multi-Agent
+A framework for **factor / strategy sleeve rotation** using Multi-Agent
 Reinforcement Learning (MARL) and LLM-based market regime classification.
 
 The system allocates capital across broad equity *strategy sleeves* — such as Momentum,
